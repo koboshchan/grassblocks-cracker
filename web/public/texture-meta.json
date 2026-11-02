@@ -1,0 +1,18 @@
+{
+  "name": "grass_block_top.png",
+  "path": "assets/minecraft/textures/block/grass_block_top.png",
+  "sha": "6abb3a1e5717f8e70b51b2fd1697f0ca0a26152a",
+  "size": 298,
+  "url": "https://api.github.com/repos/InventivetalentDev/minecraft-assets/contents/assets/minecraft/textures/block/grass_block_top.png?ref=1.21.4",
+  "html_url": "https://github.com/InventivetalentDev/minecraft-assets/blob/1.21.4/assets/minecraft/textures/block/grass_block_top.png",
+  "git_url": "https://api.github.com/repos/InventivetalentDev/minecraft-assets/git/blobs/6abb3a1e5717f8e70b51b2fd1697f0ca0a26152a",
+  "download_url": "https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/1.21.4/assets/minecraft/textures/block/grass_block_top.png",
+  "type": "file",
+  "content": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAAAAAA6mKC9AAAA8UlEQVR42gUA\nWW+CMPj7yXuZ0ylHOWwpR6EFC0ERh8gh+ELGEl9mwh8zEC9iv2eaVxwodpoP\nHxKvlJmeGVp3E4uHXah8xXJIGMbndsRf+gwrm8ooU7hm+pK5jQI/5mgODzI8\nP/XmrhIfsnR9Q4ckxwkx1ySIQT3WITepZuHfIWokA4ZPbri7WnLEiJVaB00+\n9wMaj1NvcFsUKkjjz/fSXscR74KJIcgLWRtzIF6bxmREMrDGfSUt7kjubSdN\nofCUiGaR/U0jqpzrjQTUrriSoeUi2rwk7QOqy2s73WOhJgnuTu4G7ANxrmks\ngv9dZ4WkeAPz+JNw8txdwAAAAABJRU5ErkJggg==\n",
+  "encoding": "base64",
+  "_links": {
+    "self": "https://api.github.com/repos/InventivetalentDev/minecraft-assets/contents/assets/minecraft/textures/block/grass_block_top.png?ref=1.21.4",
+    "git": "https://api.github.com/repos/InventivetalentDev/minecraft-assets/git/blobs/6abb3a1e5717f8e70b51b2fd1697f0ca0a26152a",
+    "html": "https://github.com/InventivetalentDev/minecraft-assets/blob/1.21.4/assets/minecraft/textures/block/grass_block_top.png"
+  }
+}
