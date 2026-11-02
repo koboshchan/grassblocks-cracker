@@ -14,27 +14,55 @@ async function gpuSolver(){
  const module=device.createShaderModule({code});
  const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');
  if(errors.length)throw Error(errors.map(e=>e.message).join('\n'));
- const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'search'}});
+ const blockLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
+ const layout=device.createPipelineLayout({bindGroupLayouts:[blockLayout]});
+ let wg=256,items=1;
+ let pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});
+ let tuned=false;let tuning:any=null;
  const resultSize=16+4096*16;
  const result=device.createBuffer({size:resultSize,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
  const read=device.createBuffer({size:resultSize,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
  const params=device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
  const adapterInfo=adapter.info||{};
+ let codeHash=0;for(const c of code)codeHash=(Math.imul(codeHash,31)+c.charCodeAt(0))|0;
+ const cacheKey='grass-wgsl-tune-v2:'+JSON.stringify(adapterInfo)+':'+codeHash;
  let running=false;
- return {backend:'webgpu',adapterInfo,async search(blocks:Block[],o:SearchOptions){
+ return {backend:'webgpu',adapterInfo,get tuning(){return tuning;},async search(blocks:Block[],o:SearchOptions){
  if(running)throw Error('A search is already running.');running=true;
  let blockBuffer;
  try {
  const total=validate(blocks,o),matches=[],start=performance.now();let done=0;
  const emit=()=>o.onProgress?.({done,total,seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)});
  blockBuffer=device.createBuffer({size:blocks.length*20,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
- const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:blockBuffer}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:result}}]});
+ const group=device.createBindGroup({layout:blockLayout,entries:[{binding:0,resource:{buffer:blockBuffer}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:result}}]});
  let target=2048;
+ if(!tuned){
+ device.queue.writeBuffer(blockBuffer,0,new Int32Array(turnBlocks(blocks,o.north[0]).flatMap(b=>[b.x,b.y,b.z,b.rotation,b.is_side])));
+ let cached:any=null;try{cached=JSON.parse(localStorage.getItem(cacheKey)||'null');}catch{}
+ if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
+ wg=cached.wg;items=cached.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...cached,cached:true};
+ }else{
+ const trials:any[]=[];const count=16384,benchY=Math.min(o.ymax,o.ymin+15);
+ device.queue.writeBuffer(params,0,new Int32Array([o.xmin,o.zmin,o.ymin,benchY,128,0,count,blocks.length]));
+ for(const w of [64,128,256])for(const it of [1,2,4]){
+ if(o.signal?.aborted)break;
+ const candidate=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it}}});
+ const times:number[]=[];
+ for(let rep=0;rep<3;rep++){
+ device.queue.writeBuffer(result,0,new Uint32Array([0,0,0,0]));const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(candidate);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/(w*it)));pass.end();const before=performance.now();device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();if(rep)times.push(performance.now()-before);
+ }
+ trials.push({wg:w,items:it,ms:Math.min(...times)});
+ }
+ trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:256,items:1,ms:0};wg=best.wg;items=best.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...best,trials,cached:false};try{localStorage.setItem(cacheKey,JSON.stringify(best));}catch{}
+ }
+ tuned=true;
+ }
+
  async function dispatch(x,z,width,offset,count,ya,yb,n){
  if(lost)throw Error(lost);if(o.signal?.aborted)return;
  const par=new Int32Array([x,z,ya,yb,width,offset,count,blocks.length]);
  device.queue.writeBuffer(params,0,par);device.queue.writeBuffer(result,0,new Uint32Array([0,0,0,0]));
- const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/256));pass.end();
+ const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/(wg*items)));pass.end();
  enc.copyBufferToBuffer(result,0,read,0,resultSize);device.queue.submit([enc.finish()]);
  await read.mapAsync(GPUMapMode.READ);const data=new Int32Array(read.getMappedRange()).slice();read.unmap();
  const found=data[0]>>>0;
@@ -94,7 +122,7 @@ function cpuSolver(requested?:number){
  const r=await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
  for(const mx of new Int32Array(r.xs)){const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);}
  if(matches.length>(o.maxMatches??100000))throw Error('Over 100,000 matches. Add more observations.');
- done+=task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});
+ done+=r.tested??task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});
  }
  }));
  const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!o.signal?.aborted};

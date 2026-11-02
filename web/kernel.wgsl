@@ -23,10 +23,14 @@ struct Results {count:atomic<u32>,xyz:array<vec4<i32>>}
 @group(0) @binding(0) var<storage,read> blocks:array<Block>;
 @group(0) @binding(1) var<uniform> p:Params;
 @group(0) @binding(2) var<storage,read_write> results:Results;
-@compute @workgroup_size(256)
+override WG_SIZE:u32=256u;
+override ITEMS:u32=1u;
+@compute @workgroup_size(WG_SIZE)
 fn search(@builtin(global_invocation_id) id:vec3<u32>){
- if(id.x>=p.count){return;}
- let pos=p.offset+id.x;
+ for(var item=0u;item<ITEMS;item++){
+ let index=id.x*ITEMS+item;
+ if(index>=p.count){return;}
+ let pos=p.offset+index;
  let x=p.xmin+i32(pos%p.width);let z=p.zmin+i32(pos/p.width);
  for(var y=p.ymin;y<=p.ymax;y++){
   var matched=true;
@@ -37,4 +41,5 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
   }
   if(matched){let i=atomicAdd(&results.count,1u);if(i<4096u){results.xyz[i]=vec4(x,y,z,0);}}
  }
+}
 }
