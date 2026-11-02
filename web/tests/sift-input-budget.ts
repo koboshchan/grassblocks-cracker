@@ -11,3 +11,8 @@ for(const [w,h] of [[1920,1080],[2560,1440],[3840,2160],[1921,1081],[257,129],[7
 assert.throws(()=>prepareSiftImage(new Float32Array(11),4,4));
 assert.throws(()=>prepareSiftImage(new Float32Array(64*64*3),64,64),/stride/);
 console.log('invalid grayscale / RGB stride rejected PASS');
+for(const n of [-1,-2,20001,NaN]) {
+ let freed=0;const s:any={HEAPF32:new Float32Array(1024),_malloc:()=>4,_free:()=>freed++,_extract:()=>n};
+ assert.throws(()=>extractSiftFeatures(s,new Float32Array(64),8,8),/extraction failed/);assert.equal(freed,1);
+}
+console.log('native allocation-error returns are rejected and freed PASS');
