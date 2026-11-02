@@ -12,6 +12,7 @@ class Static(SimpleHTTPRequestHandler):
   self.send_header('Cross-Origin-Embedder-Policy','require-corp')
   self.send_header('Cross-Origin-Resource-Policy','same-origin')
   self.send_header('X-Content-Type-Options','nosniff')
+  self.send_header('Cache-Control','no-cache')
   super().end_headers()
  def guess_type(self,path):
   if path.endswith('.wasm'):return 'application/wasm'
