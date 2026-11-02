@@ -24,7 +24,7 @@ async function gpuSolver(){
  const result=device.createBuffer({size:resultSize,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
  const read=device.createBuffer({size:resultSize,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
  const params=device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
- const rawInfo=adapter.info||{};const adapterInfo={vendor:rawInfo.vendor||'',architecture:rawInfo.architecture||'',device:rawInfo.device||'',description:rawInfo.description||''};
+ const rawInfo:Partial<GPUAdapterInfo>=adapter.info||{};const adapterInfo={vendor:rawInfo.vendor||'',architecture:rawInfo.architecture||'',device:rawInfo.device||'',description:rawInfo.description||''};
  let codeHash=0;for(const c of code)codeHash=(Math.imul(codeHash,31)+c.charCodeAt(0))|0;
  const cacheKey='grass-wgsl-tune-v2:'+JSON.stringify(adapterInfo)+':'+codeHash;
  let running=false;
@@ -43,8 +43,8 @@ async function gpuSolver(){
  if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
  wg=cached.wg;items=cached.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...cached,cached:true};
  }else{
- const trials:any[]=[];const count=16384,benchY=Math.min(o.ymax,o.ymin+15);
- device.queue.writeBuffer(params,0,new Int32Array([o.xmin,o.zmin,o.ymin,benchY,128,0,count,blocks.length]));
+ const trials:any[]=[];const count=262144,benchY=Math.min(o.ymax,o.ymin+31);
+ device.queue.writeBuffer(params,0,new Int32Array([o.xmin,o.zmin,o.ymin,benchY,1024,0,count,blocks.length]));
  for(const w of [64,128,256])for(const it of [1,2,4]){
  if(o.signal?.aborted)break;
  const candidate=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it}}});
@@ -119,9 +119,9 @@ function cpuSolver(requested?:number){
  await Promise.all(Array.from({length:count},async()=>{
  const blobURL=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));
  const worker=new Worker(blobURL,{type:'module'});URL.revokeObjectURL(blobURL);pool.push(worker);
- await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));worker.postMessage({init:true,wasmUrl:new URL('./solver.wasm',import.meta.url).href});});
+ await new Promise<void>((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));worker.postMessage({init:true,wasmUrl:new URL('./solver.wasm',import.meta.url).href});});
  for(;;){const task=next();if(!task)break;
- const r=await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
+ const r=await new Promise<{xs:ArrayBuffer;tested?:number}>((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
  for(const mx of new Int32Array(r.xs)){const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);}
  if(matches.length>(o.maxMatches??100000))throw Error('Over 100,000 matches. Add more observations.');
  done+=r.tested??task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});

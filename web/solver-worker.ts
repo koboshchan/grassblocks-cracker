@@ -1,8 +1,6 @@
-const url=new URL('./solver.wasm',import.meta.url);
 let api;
-try{const response=await fetch(url);const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());api=instance.exports;postMessage({ready:true});}
-catch(e){postMessage({error:'WASM solver failed to load: '+e.message});}
-onmessage=({data:t})=>{
+onmessage=async({data:t})=>{
+ if(t.init){try{const response=await fetch(t.wasmUrl);if(!response.ok)throw Error(String(response.status));const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());api=instance.exports;postMessage({ready:true});}catch(e){postMessage({error:"WASM solver failed to load: "+e.message});}return;}
  try{
  if(t.sharedCancel&&Atomics.load(t.sharedCancel,0)){postMessage({xs:new ArrayBuffer(0),tested:0});return;}
  const ints=new Int32Array(api.memory.buffer),bp=api.blocks_ptr()/4;

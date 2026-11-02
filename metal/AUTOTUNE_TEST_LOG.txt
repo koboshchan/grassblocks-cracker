@@ -1,0 +1,44 @@
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B5091g
+Apple M1
+Apple clang version 21.0.0 (clang-2100.3.34.2)
+Target: arm64-apple-darwin27.2.0
+Thread model: posix
+InstalledDir: /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+PASS force, disk cache hit, off, non-divisible batch tail; identical hill origin
+autotune sample width 64 items 1 gpu_ms 2.78899
+autotune sample width 64 items 2 gpu_ms 2.43572
+autotune sample width 64 items 4 gpu_ms 2.77474
+autotune sample width 64 items 8 gpu_ms 0.901014
+autotune sample width 128 items 1 gpu_ms 3.14125
+autotune sample width 128 items 2 gpu_ms 2.09431
+autotune sample width 128 items 4 gpu_ms 1.3139
+autotune sample width 128 items 8 gpu_ms 0.74325
+autotune sample width 256 items 1 gpu_ms 2.96692
+autotune sample width 256 items 2 gpu_ms 2.75097
+autotune sample width 256 items 4 gpu_ms 1.12635
+autotune sample width 256 items 8 gpu_ms 1.62622
+autotune sample width 512 items 1 gpu_ms 0.727556
+autotune sample width 512 items 2 gpu_ms 2.54785
+autotune sample width 512 items 4 gpu_ms 2.54642
+autotune sample width 512 items 8 gpu_ms 1.10821
+autotune selected width 512 items 1 measured_ms 0.727556 variants 16 verified_samples 144 tune_seconds 0.663231 cache /var/folders/8c/n8pv_c3s7xl69g2j4g4600sr0000gn/T/tmpjbeeyi3e/nested/tune.plist saved
+complete total 1008005 matches 1 seconds 0.673195 rate 1.49734e+06 candidates/s
+autotune cache hit width 512 items 1 measured_ms 0.727556 cache /var/folders/8c/n8pv_c3s7xl69g2j4g4600sr0000gn/T/tmpjbeeyi3e/nested/tune.plist
+complete total 1008005 matches 1 seconds 0.0120554 rate 8.36143e+07 candidates/s
+PASS shape invalidation
+PASS force bypass and clear-cache
+PASS corrupt plist and invalid launch rejection
+PASS explicit cache path and unwritable-cache fallback
+PASS malformed autotune options

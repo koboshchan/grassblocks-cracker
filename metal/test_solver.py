@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as d:
  p=pathlib.Path(d)/"formation.txt"
  def run(data,args,good=True):
   p.write_text(data)
-  c=subprocess.run([exe,"--formation",str(p)]+list(map(str,args)),text=True,capture_output=True)
+  c=subprocess.run([exe]+sys.argv[2:]+["--formation",str(p)]+list(map(str,args)),text=True,capture_output=True)
   assert (c.returncode==0)==good,(args,c.stdout,c.stderr)
   return c
  # Dense output verifies no old 100-result truncation, north transform and confidence parser.
