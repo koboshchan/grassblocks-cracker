@@ -1,0 +1,2 @@
+import fs from 'node:fs';import {rotationBigInt} from '/home/kit/grass-webgpu/web/hash.ts';
+const rows=fs.readFileSync('/tmp/grass-ui-qa/auto-hill-formation.txt','utf8').split('\n').slice(1).filter(x=>x&&!x.startsWith('#')).map(x=>x.split(/\s+/).map(Number));if(rows.length!==22)throw Error('Wrong observation count');for(const[x,y,z,r]of rows)if(rotationBigInt(3538+x,90+y,-455+z)!==r)throw Error('Rotation mismatch');console.log('Browser-upload Auto exported22 observations; every observation independently matches3538,90,-455 north0');
