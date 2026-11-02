@@ -1,0 +1,16 @@
+{
+  hill: true,
+  dense: 190,
+  pause: true,
+  first: true,
+  limit: true,
+  tuning: {
+    workers: 2,
+    ms: 8.799999952316284,
+    trials: [ [Object], [Object], [Object] ],
+    cached: false,
+    benchmarkCandidates: 65536
+  },
+  cache: true,
+  calibrationCancel: true
+}
