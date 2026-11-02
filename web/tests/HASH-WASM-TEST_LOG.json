@@ -1,0 +1,13 @@
+{
+  "scalarCoordinates": 100000,
+  "simdLanes": 800000,
+  "hillMatches": [
+    [
+      3538,
+      90,
+      -454,
+      0
+    ]
+  ],
+  "pass": true
+}
