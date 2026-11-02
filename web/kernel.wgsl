@@ -29,12 +29,12 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
  let pos=p.offset+id.x;
  let x=p.xmin+i32(pos%p.width);let z=p.zmin+i32(pos/p.width);
  for(var y=p.ymin;y<=p.ymax;y++){
-  var match=true;
+  var matched=true;
   for(var i=0u;i<p.blocks;i++){
    let b=blocks[i];let r=rotation(x+b.x,y+b.y,z+b.z);
    let mask=select(3u,1u,b.side!=0);
-   if((r&mask)!=u32(b.r)){match=false;break;}
+   if((r&mask)!=u32(b.r)){matched=false;break;}
   }
-  if(match){let i=atomicAdd(&results.count,1u);if(i<4096u){results.xyz[i]=vec4(x,y,z,0);}}
+  if(matched){let i=atomicAdd(&results.count,1u);if(i<4096u){results.xyz[i]=vec4(x,y,z,0);}}
  }
 }
