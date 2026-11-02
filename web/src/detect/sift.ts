@@ -1,11 +1,40 @@
 /** VLFeat SIFT runs in WASM. No scene recognition or stored image coordinates. */
-export function siftSeeds(s: any, cv: any, ctx: any, log = (_: string) => {}) {
- function features(g: ArrayLike<number>, w: number, h: number) {
-  const p = s._malloc(w*h*4);
-  if (!p) throw Error('SIFT allocation failed');
-  try { s.HEAPF32.set(g,p/4); const n=s._extract(p,w,h); return {n,a:s.HEAPF32.slice(s._get_out()/4,s._get_out()/4+n*130)}; }
-  finally { s._free(p); }
+// First octave doubles each dimension. Bound its pyramid, not just the input buffer.
+export const SIFT_MAX_PIXELS = 1024 * 1024;
+export function prepareSiftImage(g: ArrayLike<number>, w: number, h: number) {
+ if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w < 8 || h < 8 || w * h > 16 * 1024 * 1024 || g.length !== w * h)
+  throw Error('Invalid SIFT grayscale dimensions or stride');
+ const scale = Math.min(1, Math.sqrt(SIFT_MAX_PIXELS / (w * h)), 2048 / Math.max(w,h));
+ const width = Math.max(8, Math.floor(w * scale)), height = Math.max(8, Math.floor(h * scale));
+ const sx = w / width, sy = h / height;
+ if (width === w && height === h) return {data:g,width,height,sx,sy};
+ const data = new Float32Array(width * height);
+ for (let y=0;y<height;y++) {
+  const fy=(y+.5)*sy-.5, y0=Math.max(0,Math.floor(fy)), y1=Math.min(h-1,y0+1), dy=fy-y0;
+  for (let x=0;x<width;x++) {
+   const fx=(x+.5)*sx-.5, x0=Math.max(0,Math.floor(fx)), x1=Math.min(w-1,x0+1), dx=fx-x0;
+   data[y*width+x]=(1-dy)*((1-dx)*g[y0*w+x0]+dx*g[y0*w+x1])+dy*((1-dx)*g[y1*w+x0]+dx*g[y1*w+x1]);
+  }
  }
+ return {data,width,height,sx,sy};
+}
+export function extractSiftFeatures(s:any, g:ArrayLike<number>, w:number, h:number) {
+ const image=prepareSiftImage(g,w,h), bytes=image.width*image.height*4;
+ const p=s._malloc(bytes);
+ if (!p || p % 4 || p + bytes > s.HEAPF32.byteLength) throw Error('SIFT allocation failed');
+ try {
+  s.HEAPF32.set(image.data,p/4);
+  const n=s._extract(p,image.width,image.height);
+  if (!Number.isInteger(n) || n<0 || n>20000) throw Error('SIFT extraction failed or exceeded memory budget');
+  const out=s._get_out(); // _extract may grow memory, so reacquire HEAPF32 afterward.
+  if (!Number.isSafeInteger(out) || out<0 || out%4 || out+n*130*4>s.HEAPF32.byteLength) throw Error('Invalid SIFT result buffer');
+  const a=s.HEAPF32.slice(out/4,out/4+n*130);
+  for (let i=0;i<n;i++) {a[i*130]=(a[i*130]+.5)*image.sx-.5;a[i*130+1]=(a[i*130+1]+.5)*image.sy-.5;}
+  return {n,a};
+ } finally {s._free(p);}
+}
+export function siftSeeds(s: any, cv: any, ctx: any, log = (_: string) => {}) {
+ const features=(g:ArrayLike<number>,w:number,h:number)=>extractSiftFeatures(s,g,w,h);
  const S=256, ref=Float32Array.from({length:S*S},(_,i)=>ctx.ref[Math.floor(i/S/16)][Math.floor(i%S/16)]);
  const a=features(ref,S,S), b=features(ctx.g,ctx.w,ctx.h);
  log(`SIFT WASM: ${a.n} texture / ${b.n} image features`);

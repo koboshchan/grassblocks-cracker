@@ -335,7 +335,13 @@ export function runDetection(cv, img, ref, opts, progress?, hooks?) {
     if (!manual) {
       if (!cv) return { blocks: [], reason: 'OpenCV.js unavailable', notes };
       log('finding grass tiles with feature matching');
-      rawSeeds = ctx.featureSeeds ? ctx.featureSeeds(cv, ctx, log) : seedsFromFeatures(cv, ctx, log);
+      try { rawSeeds = ctx.featureSeeds ? ctx.featureSeeds(cv, ctx, log) : seedsFromFeatures(cv, ctx, log); }
+      catch (e) {
+        notes.push('SIFT unavailable; using non-SIFT detection');
+        log('feature matching unavailable, trying binary feature fallback');
+        try {rawSeeds=seedsFromFeatures(cv,ctx,log);}
+        catch (_) {rawSeeds=[];log('binary features unavailable, trying texture scan');}
+      }
     }
     log('verifying ' + rawSeeds.length + ' candidate tile(s)');
     let seeds = rawSeeds.map(q => verify(ctx, q, refine, ctx.opts)).filter(r => r && r.score >= ctx.opts.accept && r.margin >= ctx.opts.acceptMargin && r.votes === 4);

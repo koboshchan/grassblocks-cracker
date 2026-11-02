@@ -24,6 +24,10 @@ self.onmessage = async (ev: MessageEvent) => {
   const m = ev.data;
   try {
     if (m.type === 'init') { await init(m.opencvUrl, m.wasmUrl); post({ type: 'ready', backend: wasmOK ? wasm.detectorBackend : 'JS' }); return; }
+    if (m.type === 'classifyQuad' || m.type === 'detect') {
+      if (!Number.isSafeInteger(m.width) || !Number.isSafeInteger(m.height) || m.width < 8 || m.height < 8 || m.width*m.height > 16*1024*1024 || !(m.buffer instanceof ArrayBuffer) || m.buffer.byteLength !== m.width*m.height*4)
+        throw Error('Invalid image buffer. Expected packed RGBA pixels and valid dimensions (maximum 16 megapixels).');
+    }
     if (m.type === 'classifyQuad') {
       const d = new Uint8ClampedArray(m.buffer), gray = new Uint8Array(m.width * m.height);
       for (let i = 0; i < gray.length; i++) gray[i] = d[4 * i + 1];
@@ -45,7 +49,10 @@ self.onmessage = async (ev: MessageEvent) => {
         wasm.setRefs(refs); wasm.setImage(gray, m.width, m.height);
         hooks.classifyBatch = (q: Float32Array, n: number) => wasm.classifyBatch(q, n);
       }
-      if (sift) hooks.featureSeeds = (cv: any, ctx: any, log: any) => siftSeeds(sift, cv, ctx, log);
+      if (sift) hooks.featureSeeds = (cv: any, ctx: any, log: any) => {
+        try {return siftSeeds(sift, cv, ctx, log);}
+        catch(e) {sift=null;throw e;} // A trapping native module must not be reused.
+      };
       const t0 = performance.now();
       const r = runDetection(cv, img, m.ref, { ...(m.opts || {}), seeds: m.seeds }, (t: string) => post({ type: 'progress', text: t }), hooks);
       post({ type: 'result', result: { ...r, seconds: (performance.now() - t0) / 1000, backend: wasmOK ? wasm.detectorBackend : 'JS' } });
