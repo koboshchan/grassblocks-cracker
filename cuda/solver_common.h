@@ -22,7 +22,7 @@ struct Options{
 static Options options(int argc,char**argv){
  Options o;std::vector<std::string> pos;
  for(int i=1;i<argc;i++){std::string a=argv[i];
- if(a=="--help"||a=="-h"){std::cout<<"Usage: solver [--formation FILE] [--north 0|1|2|3|all] [xmin xmax ymin ymax zmin zmax]\nInclusive int32 bounds; stdout: x y z north. Progress, rate and total on stderr.\n";std::exit(0);}
+ if(a=="--help"||a=="-h"){std::cout<<"Usage: solver [--formation FILE] [--north 0|1|2|3|all] [--autotune auto|force|off] [xmin xmax ymin ymax zmin zmax]\nInclusive int32 bounds; stdout: x y z north. Progress, rate and total on stderr.\n";std::exit(0);}
  else if(a=="--formation"||a=="--north"){if(++i==argc)throw std::runtime_error("Missing option value");if(a=="--formation")o.path=argv[i];else {std::string n=argv[i];if(n=="all")o.north={0,1,2,3};else{auto v=number(n);if(v<0||v>3)throw std::runtime_error("north must be 0..3 or all");o.north={int(v)};}}}
  else pos.push_back(a);
  }

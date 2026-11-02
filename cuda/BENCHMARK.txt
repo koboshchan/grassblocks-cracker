@@ -1,0 +1,18 @@
+Actual Windows RTX 4070 SUPER, CUDA12.1, VS2026, nvcc -O3 -arch=sm_89 (compatibility override flags documented)
+Preflight 3–4% GPU,1068MiB; no training/encoder/Docker processes changed.
+Bounds -5000 5000 60 128 -5000 5000 hill22.txt
+Origins per north 6901380069
+Original search total 6901380069 matches1 sec3.90925 rate1.7654e9
+Optimized pre-autotune sec0.233125 rate2.96038e10
+Force autotune 64threads4items sec0.224159 rate3.07879e10
+Cache hit 64threads4items sec0.235741 rate2.92752e10
+FC original/cache output no differences
+Four north total27605520276 sole3538 90 -454 0
+Force selected128threads4items sec0.861909 rate3.20283e10
+Cache hit128threads4items sec0.840253 rate3.28538e10
+FC force/cache output no differences
+Every12config trial exact sorted-result agreement.
+Example trial kernel_ms:64x1 .060416;64x2 .058368;64x4 .0580267;128x1 .0597333;128x2 .058592;128x4 .0576853;256x1 .0600747;256x2 .058624;256x4 .058368;512x1 .0612053;512x2 .0594347;512x4 .0587093
+PASS 100000 full-int32 randomized CUDA hashes vs independent Java-semantics Python oracle
+PASS dense/all-north oracle5043 matches;12mixedheight side signedwrap cases; malformed validation
+All timing values above are observed; wall search times exclude startup/autotune. Event times are kernel microbenchmark only.
