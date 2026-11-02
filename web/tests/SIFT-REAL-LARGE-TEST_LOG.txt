@@ -1,0 +1,6 @@
+1920x1080 -> 1365x768, 13846 real features, mapped coordinates/descriptors PASS, heap 466681856
+2560x1440 -> 1365x768, 15589 real features, mapped coordinates/descriptors PASS, heap 466681856
+3840x2160 -> 1365x768, 20000 real features, mapped coordinates/descriptors PASS, heap 466681856
+1921x1081 -> 1365x768, 13638 real features, mapped coordinates/descriptors PASS, heap 466681856
+1920x1080 -> 1365x768, 13846 real features, mapped coordinates/descriptors PASS, heap 466681856
+PASS actual prepareSiftImage + extractSiftFeatures + compiled WASM, four large dimensions and repeated-call reuse
