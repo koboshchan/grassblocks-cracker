@@ -52,16 +52,22 @@ $('#btnGrow').onclick = () => runDetect([{ quad: quad.map(p => p.slice()), manua
 
 /* image loading */
 async function load(src: Blob | string) {
-  const url = typeof src === 'string' ? src : URL.createObjectURL(src), im = new Image();
-  await new Promise((res, rej) => { im.onload = res; im.onerror = rej; im.src = url; });
-  img = im; blocks = []; quad = []; sel = -1; view.width = im.width; view.height = im.height; $('#wrap').classList.add('has'); $('#hint').textContent = im.width + 'x' + im.height; refresh(); busyDet(false);
+  const owned = typeof src !== 'string';
+  if (owned && src.size > 32 * 1024 * 1024) throw new Error('Choose a screenshot smaller than32MB.');
+  const url = owned ? URL.createObjectURL(src as Blob) : src as string, im = new Image();
+  try {
+    await new Promise((res, rej) => { im.onload = res; im.onerror = () => rej(new Error('That file could not be decoded as an image.')); im.src = url; });
+    if (im.width * im.height > 16_000_000 || !im.width || !im.height) throw new Error('Screenshot limit is16 million pixels. Crop to the grass you want to inspect.');
+    img = im; blocks = []; quad = []; sel = -1; view.width = im.width; view.height = im.height; $('#wrap').classList.add('has'); $('#hint').textContent = im.width + 'x' + im.height; refresh(); busyDet(false);
+  } finally { if (owned) URL.revokeObjectURL(url); }
 }
-$('#file').onchange = (e: any) => e.target.files[0] && load(e.target.files[0]);
+function openImage(src: Blob | string) { load(src).catch(e => { $('#detLog').classList.add('on'); $('#detLog').textContent = e.message; }); }
+$('#file').onchange = (e: any) => e.target.files[0] && openImage(e.target.files[0]);
 const wrap = $('#wrap');
 addEventListener('dragover', e => { e.preventDefault(); wrap.classList.add('over'); });
 addEventListener('dragleave', () => wrap.classList.remove('over'));
-addEventListener('drop', e => { e.preventDefault(); wrap.classList.remove('over'); const f = e.dataTransfer?.files[0]; if (f) load(f); });
-addEventListener('paste', e => { const f = [...(e.clipboardData?.files || [])][0]; if (f) load(f); });
+addEventListener('drop', e => { e.preventDefault(); wrap.classList.remove('over'); const f = e.dataTransfer?.files[0]; if (f) openImage(f); });
+addEventListener('paste', e => { const f = [...(e.clipboardData?.files || [])][0]; if (f) openImage(f); });
 $('#btnHill').onclick = async () => {
   await load('examples/hill.png'); const j = await (await fetch('examples/hill.json')).json();
   blocks = j.blocks.map((b: any) => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: 0, include: true, score: b.score, quad: b.quad }));
