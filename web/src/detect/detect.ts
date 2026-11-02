@@ -1,4 +1,5 @@
 // @ts-nocheck
+import {prepareSiftImage} from './sift';
 
 export const DEFAULTS = { accept: 0.88, acceptMargin: 0.35, relaxed: 0.78, coarse: 0.55 };
 
@@ -124,6 +125,11 @@ export function makeContext(img, ref, opts?, hooks?) {
 
 /* ---------- stage 1: feature seeds (OpenCV.js) ---------- */
 function mat8(cv, g, w, h) { const m = new cv.Mat(h, w, cv.CV_8UC1); for (let i = 0; i < w * h; i++) m.data[i] = g[i]; return m; }
+function boundedBinarySeeds(cv, ctx, log) {
+  const im=prepareSiftImage(ctx.g,ctx.w,ctx.h);
+  const seeds=seedsFromFeatures(cv,{...ctx,g:im.data,w:im.width,h:im.height},log);
+  return seeds.map(q=>q.map(([x,y])=>[(x+.5)*im.sx-.5,(y+.5)*im.sy-.5]));
+}
 function seedsFromFeatures(cv, ctx, progress) {
   const { w, h, g } = ctx, log = progress || (() => {});
   const img = mat8(cv, g, w, h), refSmall = new cv.Mat(16, 16, cv.CV_8UC1);
@@ -335,11 +341,11 @@ export function runDetection(cv, img, ref, opts, progress?, hooks?) {
     if (!manual) {
       if (!cv) return { blocks: [], reason: 'OpenCV.js unavailable', notes };
       log('finding grass tiles with feature matching');
-      try { rawSeeds = ctx.featureSeeds ? ctx.featureSeeds(cv, ctx, log) : seedsFromFeatures(cv, ctx, log); }
+      try { rawSeeds = ctx.featureSeeds ? ctx.featureSeeds(cv, ctx, log) : boundedBinarySeeds(cv, ctx, log); }
       catch (e) {
         notes.push('SIFT unavailable; using non-SIFT detection');
         log('feature matching unavailable, trying binary feature fallback');
-        try {rawSeeds=seedsFromFeatures(cv,ctx,log);}
+        try {rawSeeds=boundedBinarySeeds(cv,ctx,log);}
         catch (_) {rawSeeds=[];log('binary features unavailable, trying texture scan');}
       }
     }
