@@ -11,8 +11,9 @@ function setStatus(t: string, k = '') { $('#statusText').textContent = t; $('#do
 function log(t: string) { const l = $('#detLog'); l.classList.add('on'); l.textContent += t + '\n'; l.scrollTop = 1e9; }
 
 /* texture swatches + reference */
-const texImg = new Image(); texImg.src = 'grass_block_top.png';
-const texReady = new Promise<void>(r => { texImg.onload = () => r(); });
+const texImg = new Image();
+const texReady = new Promise<void>((r, reject) => { texImg.onload = () => r(); texImg.onerror = () => reject(Error('Texture failed to load. Reload this page.')); });
+texImg.src = 'grass_block_top.png';
 texReady.then(() => {
   const c = document.createElement('canvas'); c.width = c.height = 16; const x = c.getContext('2d')!; x.drawImage(texImg, 0, 0, 16, 16);
   const d = x.getImageData(0, 0, 16, 16).data; ref = []; for (let y = 0; y < 16; y++) { ref.push([]); for (let xx = 0; xx < 16; xx++) ref[y].push(d[4 * (y * 16 + xx) + 1]); }
@@ -113,8 +114,8 @@ $('#btnAdd').onclick = () => { blocks.push({ x: 0, y: 0, z: 0, rotation: 0, is_s
 $('#btnImport').onclick = () => $('#importFile').click();
 $('#importFile').onchange = async (e: any) => { const f = e.target.files[0]; if (!f) return; try { blocks = parseFormation(await f.text()); sel = -1; refresh(); } catch (er: any) { alert('Could not read formation: ' + er.message); } };
 function download(name: string, text: string) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
-$('#btnExport').onclick = () => download('formation.txt', formatFormation(blocks, ['exported by grass cracker, north 0 frame']));
-$('#btnNative').onclick = () => { const ns = norths(); ns.forEach(n => download('formation-north' + n + '.txt', formatFormation(applyNorth(blocks, n)))); };
+$('#btnExport').onclick = () => { try { download('formation.txt', formatFormation(blocks, ['exported by grass cracker, north 0 frame'])); } catch(e: any) { $('#runStats').textContent = 'error: '+e.message; } };
+$('#btnNative').onclick = () => { try { download('formation.txt', formatFormation(blocks, ['raw north 0 frame; choose --north all in the native solver'])); } catch(e: any) { $('#runStats').textContent = 'error: '+e.message; } };
 function refresh() { table(); draw(); upd(); }
 
 /* search */
@@ -123,7 +124,9 @@ function bounds() { const g = (id: string) => +$('#' + id).value; return { xmin:
 function upd() {
   $('#btnRun').disabled = !blocks.some(b => b.include) || !!abort;
   const b = bounds(), n = norths(); $('#cmd').classList.toggle('on', blocks.length > 0);
-  $('#cmd').textContent = 'cuda:  grass_solver.exe ' + [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ') + '\nmetal: ./grass_solver ' + [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ') + '\n(run once per formation-north*.txt, copied to formation.txt; norths ' + n.join(',') + ')';
+  const ns = n.length === 4 ? 'all' : n.length === 1 ? String(n[0]) : 'all';
+  const args = ' --formation formation.txt --north ' + ns + ' ' + [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
+  $('#cmd').textContent = 'cuda   grass_solver.exe' + args + '\nmetal  ./grass_solver' + args + (n.length > 1 && n.length < 4 ? '\nNative command searches all four norths; browser selection is a subset.' : '');
 }
 document.querySelectorAll('.bounds input,.n').forEach(e => e.addEventListener('input', upd));
 document.querySelectorAll('.chip').forEach((c: any) => c.onclick = () => { const r = +c.dataset.r; ['xmin', 'zmin'].forEach(i => $('#' + i).value = -r); ['xmax', 'zmax'].forEach(i => $('#' + i).value = r); upd(); });
@@ -132,7 +135,7 @@ $('#btnRun').onclick = async () => {
   const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick CPU or use the native download below.'; return; }
   abort = new AbortController(); $('#btnRun').disabled = true; $('#btnCancel').disabled = false; $('#matches').innerHTML = ''; $('#runBar').hidden = false; setStatus('searching', 'busy');
   try {
-    if (!solver || solver.__be !== be) { solver = await createSolver({ backend: be }); solver.__be = be; } const t0 = performance.now();
+    if (!solver || solver.__be !== be) { solver?.destroy?.(); solver = await createSolver({ backend: be }); solver.__be = be; } const t0 = performance.now();
     const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal,
       onProgress: (p: any) => { $('#runBar i').style.width = (100 * p.done / p.total) + '%'; $('#runStats').textContent = (100 * p.done / p.total).toFixed(1) + '%  ' + (p.rate / 1e9).toFixed(2) + ' G/s  ' + p.seconds.toFixed(1) + 's  ' + (solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '')); },
       onMatch: (m: any) => { const li = document.createElement('li'); li.textContent = JSON.stringify(m); $('#matches').appendChild(li); } });
@@ -140,4 +143,4 @@ $('#btnRun').onclick = async () => {
   } catch (e: any) { $('#runStats').textContent = 'error: ' + (e.message || e); }
   abort = null; $('#btnCancel').disabled = true; $('#runBar').hidden = true; setStatus('ready', 'ok'); upd();
 };
-texReady.then(startWorker); upd();
+texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();
