@@ -1,0 +1,6 @@
+autotune cache hit width 128 items 1 measured_ms 0.09575 cache /Users/lucaszhang/grassblocks/native-solvers-20261101/metal/benchmark-autotune.plist
+progress 1908408320/6901380069 rate 1.90632e+09 candidates/s matches 0
+progress 3766484992/6901380069 rate 1.8815e+09 candidates/s matches 0
+progress 5645533184/6901380069 rate 1.87807e+09 candidates/s matches 0
+search_loop seconds 3.67462 rate 1.87812e+09 candidates/s tuning_excluded 1
+complete total 6901380069 matches 1 seconds 3.67498 rate 1.87794e+09 candidates/s

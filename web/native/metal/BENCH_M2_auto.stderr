@@ -1,0 +1,5 @@
+autotune cache hit width 128 items 1 measured_ms 0.0863334 cache /Users/kobosh/grassblocks/native-solvers-20261101/metal/benchmark-autotune.plist
+progress 3166699520/6901380069 rate 3.16496e+09 candidates/s matches 0
+progress 6333399040/6901380069 rate 3.16514e+09 candidates/s matches 1
+search_loop seconds 2.17802 rate 3.16864e+09 candidates/s tuning_excluded 1
+complete total 6901380069 matches 1 seconds 2.17816 rate 3.16844e+09 candidates/s

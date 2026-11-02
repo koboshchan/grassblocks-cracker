@@ -1,0 +1,39 @@
+ac24755093c28d7bb6e060a1e3f9d7a759f74d958f4c2491bdf7fbd7964766f1  grass_solver.mm
+PASS 100000 independently classified hashes, x -50000 to 49999 y -90 z 99999
+PASS 100000 independently classified hashes, x 2147380000 to 2147479999 y 90 z -2147483000
+PASS 100000 independently classified hashes, x -50000 to 49999 y -90 z 99999
+PASS 100000 independently classified hashes, x 2147380000 to 2147479999 y 90 z -2147483000
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+PASS force, disk cache hit, off, non-divisible batch tail; identical hill origin
+autotune sample width 64 items 1 gpu_ms 0.0835
+autotune sample width 64 items 2 gpu_ms 0.0847917
+autotune sample width 64 items 4 gpu_ms 0.08925
+autotune sample width 64 items 8 gpu_ms 0.0908333
+autotune sample width 128 items 1 gpu_ms 0.0834722
+autotune sample width 128 items 2 gpu_ms 0.0852361
+autotune sample width 128 items 4 gpu_ms 0.098375
+autotune sample width 128 items 8 gpu_ms 0.0911667
+autotune sample width 256 items 1 gpu_ms 0.0838056
+autotune sample width 256 items 2 gpu_ms 0.0848056
+autotune sample width 256 items 4 gpu_ms 0.09175
+autotune sample width 256 items 8 gpu_ms 0.115792
+autotune sample width 512 items 1 gpu_ms 0.0840556
+autotune sample width 512 items 2 gpu_ms 0.0901806
+autotune sample width 512 items 4 gpu_ms 0.154028
+autotune sample width 512 items 8 gpu_ms 0.106181
+autotune selected width 128 items 1 measured_ms 0.0834722 variants 16 verified_samples 144 tune_seconds 0.0742106 cache /var/folders/8c/n8pv_c3s7xl69g2j4g4600sr0000gn/T/tmpo35t4rys/nested/tune.plist saved
+search_loop seconds 0.000566125 rate 1.78053e+09 candidates/s tuning_excluded 1
+complete total 1008005 matches 1 seconds 0.0749625 rate 1.34468e+07 candidates/s
+autotune cache hit width 128 items 1 measured_ms 0.0834722 cache /var/folders/8c/n8pv_c3s7xl69g2j4g4600sr0000gn/T/tmpo35t4rys/nested/tune.plist
+search_loop seconds 0.00196713 rate 5.12425e+08 candidates/s tuning_excluded 1
+complete total 1008005 matches 1 seconds 0.00212867 rate 4.73538e+08 candidates/s
+PASS shape invalidation
+PASS force bypass and clear-cache
+PASS corrupt plist and invalid launch rejection
+PASS explicit cache path and unwritable-cache fallback
+PASS malformed autotune options

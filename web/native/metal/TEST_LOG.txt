@@ -1,0 +1,14 @@
+metal actual remote compile/run, 2026-11-01
+clang++ -std=c++17 -O3 -fobjc-arc grass_solver.mm -framework Foundation -framework Metal -o grass_solver
+exit 0, executable built; runtime Metal shader compilation succeeded
+PASS dense/all-north hash oracle 5043 matches
+PASS mixed-height/side/all-north signed-wrap oracle 12 cases
+PASS malformed/empty/bounds/overflow validation
+hill22 --north all 3535 3541 88 92 -457 -451
+3538 90 -454 0
+complete total 980 matches 1
+exit 0
+Multi-dispatch hill regression, five chunks, inclusive bounds 3438 3638 78 102 -554 -354
+3538 90 -454 0
+complete total 1010025 matches 1 seconds 0.0326785
+exit 0
