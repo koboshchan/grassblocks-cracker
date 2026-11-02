@@ -71,7 +71,10 @@ function cpuSolver(requested?:number){
  let running=false;
  return {backend:'wasm',adapterInfo,async search(blocks:Block[],o:SearchOptions){
  if(running)throw Error('A search is already running.');running=true;
- const pool=[];
+ const pool:Worker[]=[];
+ const sharedCancel=globalThis.crossOriginIsolated&&typeof SharedArrayBuffer!=='undefined'?new Int32Array(new SharedArrayBuffer(4)):null;
+ const cancel=()=>{if(sharedCancel)Atomics.store(sharedCancel,0,1);};
+ o.signal?.addEventListener('abort',cancel,{once:true});
  try{
  const total=validate(blocks,o),matches=[],start=performance.now();let done=0,cursor=0;
  // One fixed-y,z row task avoids lossy 64-bit linear indices. Independent workers
@@ -88,13 +91,13 @@ function cpuSolver(requested?:number){
  const worker=new Worker(new URL('./solver-worker.ts',import.meta.url),{type:'module'});pool.push(worker);
  await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));});
  for(;;){const task=next();if(!task)break;
- const r=await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage(task);});
+ const r=await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
  for(const mx of new Int32Array(r.xs)){const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);}
  if(matches.length>(o.maxMatches??100000))throw Error('Over 100,000 matches. Add more observations.');
  done+=task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});
  }
  }));
  const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!o.signal?.aborted};
- }finally{pool.forEach(w=>w.terminate());running=false;}
+ }finally{pool.forEach(w=>w.terminate());o.signal?.removeEventListener('abort',cancel);running=false;}
  }};
 }
