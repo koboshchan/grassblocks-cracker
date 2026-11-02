@@ -1,0 +1,353 @@
+{
+  "platform": "Mac Apple M1",
+  "adapterInfo": {
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "",
+    "description": ""
+  },
+  "hash": {
+    "pass": 65536,
+    "oracle": "JS BigInt arbitrary precision",
+    "signed32": true
+  },
+  "benchmark": {
+    "adapter": {},
+    "small": {
+      "matches": [
+        {
+          "x": 3538,
+          "y": 90,
+          "z": -454,
+          "north": 0
+        }
+      ],
+      "done": 943164,
+      "total": 943164,
+      "seconds": 0.006399999998509884,
+      "rate": 147369375.0343121,
+      "cancelled": false
+    },
+    "speed": {
+      "matches": [],
+      "done": 1537536384,
+      "total": 1537536384,
+      "seconds": 1.4292999999970197,
+      "rate": 1075726848.1097083,
+      "cancelled": false
+    }
+  },
+  "testStatus": "PASS",
+  "oldFull": {
+    "testStatus": "PASS",
+    "adapterInfo": {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": ""
+    },
+    "benchmark": {
+      "adapter": {},
+      "small": {
+        "matches": [
+          {
+            "x": 3538,
+            "y": 90,
+            "z": -454,
+            "north": 0
+          }
+        ],
+        "done": 943164,
+        "total": 943164,
+        "seconds": 0.012199999999254942,
+        "rate": 77308524.59488519,
+        "cancelled": false
+      },
+      "speed": {
+        "matches": [],
+        "done": 1537536384,
+        "total": 1537536384,
+        "seconds": 1.343800000000745,
+        "rate": 1144170549.188233,
+        "cancelled": false
+      },
+      "full": {
+        "matches": [
+          {
+            "x": 3538,
+            "y": 90,
+            "z": -454,
+            "north": 0
+          }
+        ],
+        "done": 153630721536,
+        "total": 153630721536,
+        "seconds": 131.5703999999985,
+        "rate": 1167669335.4736457,
+        "cancelled": false
+      }
+    }
+  },
+  "earlyAutotune": {
+    "shaderSha256": "5fbfa247a7f9b67a93512cf822a8158219d0b7e75266f70b96bd8e1189bde95f",
+    "solverSha256": "f12c4375a933bdd00833664136f69a35a270b2a96b62d378d40592deee89b508",
+    "benchmark": {
+      "adapter": {},
+      "small": {
+        "matches": [
+          {
+            "x": 3538,
+            "y": 90,
+            "z": -454,
+            "north": 0
+          }
+        ],
+        "done": 943164,
+        "total": 943164,
+        "seconds": 0.3878999999985099,
+        "rate": 2431461.7169466955,
+        "cancelled": false
+      },
+      "speed": {
+        "matches": [],
+        "done": 1537536384,
+        "total": 1537536384,
+        "seconds": 1.2110999999977647,
+        "rate": 1269537101.8106165,
+        "cancelled": false
+      },
+      "full": {
+        "matches": [
+          {
+            "x": 3538,
+            "y": 90,
+            "z": -454,
+            "north": 0
+          }
+        ],
+        "done": 153630721536,
+        "total": 153630721536,
+        "seconds": 120.79819999999926,
+        "rate": 1271796446.7682543,
+        "cancelled": false
+      }
+    }
+  },
+  "finalAutotuneQuick": {
+    "title": "PASS",
+    "data": {
+      "adapter": {
+        "vendor": "apple",
+        "architecture": "metal-3",
+        "device": "",
+        "description": ""
+      },
+      "sha256": "5fbfa247a7f9b67a93512cf822a8158219d0b7e75266f70b96bd8e1189bde95f",
+      "coldFull": {
+        "matches": [],
+        "done": 1537536384,
+        "total": 1537536384,
+        "seconds": 1.2278999999985099,
+        "rate": 1252167427.3164475,
+        "cancelled": false
+      },
+      "coldTuning": {
+        "wg": 256,
+        "items": 2,
+        "ms": 3.399999998509884,
+        "trials": [
+          {
+            "wg": 256,
+            "items": 2,
+            "ms": 3.399999998509884
+          },
+          {
+            "wg": 64,
+            "items": 2,
+            "ms": 3.5
+          },
+          {
+            "wg": 64,
+            "items": 4,
+            "ms": 3.5
+          },
+          {
+            "wg": 128,
+            "items": 1,
+            "ms": 3.5
+          },
+          {
+            "wg": 128,
+            "items": 2,
+            "ms": 3.5
+          },
+          {
+            "wg": 256,
+            "items": 1,
+            "ms": 3.5
+          },
+          {
+            "wg": 256,
+            "items": 4,
+            "ms": 3.5
+          },
+          {
+            "wg": 128,
+            "items": 4,
+            "ms": 3.699999999254942
+          },
+          {
+            "wg": 64,
+            "items": 1,
+            "ms": 5.200000002980232
+          }
+        ],
+        "cached": false
+      },
+      "warmSpeed": {
+        "matches": [],
+        "done": 1537536384,
+        "total": 1537536384,
+        "seconds": 1.1635,
+        "rate": 1321475190.373872,
+        "cancelled": false
+      },
+      "warmTuning": {
+        "wg": 256,
+        "items": 2,
+        "ms": 3.399999998509884,
+        "cached": true
+      },
+      "variants": [
+        {
+          "wg": 64,
+          "items": 1,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 64,
+            "items": 1,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 64,
+          "items": 2,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 64,
+            "items": 2,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 64,
+          "items": 4,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 64,
+            "items": 4,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 128,
+          "items": 1,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 128,
+            "items": 1,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 128,
+          "items": 2,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 128,
+            "items": 2,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 128,
+          "items": 4,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 128,
+            "items": 4,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 256,
+          "items": 1,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 256,
+            "items": 1,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 256,
+          "items": 2,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 256,
+            "items": 2,
+            "ms": 0,
+            "cached": true
+          }
+        },
+        {
+          "wg": 256,
+          "items": 4,
+          "hill": "PASS",
+          "overflow": "PASS",
+          "matches": 49161,
+          "positions": 196608,
+          "tuning": {
+            "wg": 256,
+            "items": 4,
+            "ms": 0,
+            "cached": true
+          }
+        }
+      ]
+    }
+  }
+}

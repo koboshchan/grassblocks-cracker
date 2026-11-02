@@ -11,10 +11,10 @@ try {
  result.adapter=info;result.sha256=hashSha;
  const text=await(await fetch('./hill.txt',{cache:'no-store'})).text();
  let blocks=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#')).slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side}});
- const full={xmin:-5000,xmax:5000,zmin:-5000,zmax:5000,ymin:-64,ymax:319,north:[0,1,2,3]};
+ const full=location.search.includes('quick')?{xmin:-1000,xmax:1000,zmin:-1000,zmax:1000,ymin:-64,ymax:319,north:[0]}:{xmin:-5000,xmax:5000,zmin:-5000,zmax:5000,ymin:-64,ymax:319,north:[0,1,2,3]};
  localStorage.removeItem(key);
  let cold=await createSolver({backend:'gpu'});result.coldFull=await cold.search(blocks,full);result.coldTuning=cold.tuning;
- if(result.coldFull.done!==result.coldFull.total||!result.coldFull.matches.some(m=>m.x===3538&&m.y===90&&m.z===-454&&m.north===0))throw Error('cold full failed');
+ if(result.coldFull.done!==result.coldFull.total||(!location.search.includes('quick')&&!result.coldFull.matches.some(m=>m.x===3538&&m.y===90&&m.z===-454&&m.north===0)))throw Error('cold full failed');
  cold.destroy();
  let warm=await createSolver({backend:'gpu'}); result.warmSpeed=await warm.search(blocks,{xmin:-1000,xmax:1000,zmin:-1000,zmax:1000,ymin:-64,ymax:319,north:[0]});result.warmTuning=warm.tuning;warm.destroy();
  const testBlocks=[{x:0,y:0,z:0,rotation:0,is_side:0}];
