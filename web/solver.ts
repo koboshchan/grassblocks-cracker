@@ -32,7 +32,9 @@ async function gpuSolver(){
  if(running)throw Error('A search is already running.');running=true;
  let blockBuffer;
  try {
- const total=validate(blocks,o),matches=[],start=performance.now();let done=0;
+ const total=validate(blocks,o),matches=[],start=performance.now();let done=0,stopped=false;
+ const limit=o.stopOnFirst?1:(o.maxMatches??100000);
+ const stopReason=()=>stopped?(o.stopOnFirst?'first match':'result limit'):undefined;
  const emit=()=>o.onProgress?.({done,total,seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)});
  blockBuffer=device.createBuffer({size:blocks.length*20,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
  const group=device.createBindGroup({layout:blockLayout,entries:[{binding:0,resource:{buffer:blockBuffer}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:result}}]});
@@ -46,7 +48,7 @@ async function gpuSolver(){
  const trials:any[]=[];const count=262144,benchY=Math.min(o.ymax,o.ymin+31);
  device.queue.writeBuffer(params,0,new Int32Array([o.xmin,o.zmin,o.ymin,benchY,1024,0,count,blocks.length]));
  for(const w of [64,128,256])for(const it of [1,2,4]){
- if(o.signal?.aborted)break;
+ await o.waitIfPaused?.();if(o.signal?.aborted)break;
  const candidate=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it}}});
  const times:number[]=[];
  for(let rep=0;rep<3;rep++){
@@ -60,7 +62,7 @@ async function gpuSolver(){
  }
 
  async function dispatch(x,z,width,offset,count,ya,yb,n){
- if(lost)throw Error(lost);if(o.signal?.aborted)return;
+ await o.waitIfPaused?.();if(lost)throw Error(lost);if(o.signal?.aborted||stopped)return;
  const par=new Int32Array([x,z,ya,yb,width,offset,count,blocks.length]);
  device.queue.writeBuffer(params,0,par);device.queue.writeBuffer(result,0,new Uint32Array([0,0,0,0]));
  const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/(wg*items)));pass.end();
@@ -73,8 +75,8 @@ async function gpuSolver(){
   else throw Error('GPU result capacity exceeded.');
   return;
  }
- for(let i=0;i<found;i++){const j=4+i*4;const m={x:data[j],y:data[j+1],z:data[j+2],north:n};matches.push(m);o.onMatch?.(m);}
- if(matches.length>(o.maxMatches??100000))throw Error('Over 100,000 matches. Add more observations or narrow the search.');
+ for(let i=0;i<found&&matches.length<limit;i++){const j=4+i*4;const m={x:data[j],y:data[j+1],z:data[j+2],north:n};matches.push(m);o.onMatch?.(m);}
+ if(matches.length>=limit)stopped=true;
  done+=count*(yb-ya+1);
  }
  for(const n of [...new Set(o.north)]){
@@ -86,29 +88,32 @@ async function gpuSolver(){
  for(let xa=o.xmin;xa<=o.xmax;xa+=4096){
  const width=Math.min(4096,o.xmax-xa+1),size=width*zh;
  for(let off=0;off<size;){
- if(o.signal?.aborted)return {matches,done,total,cancelled:true,seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)};
+ await o.waitIfPaused?.();
+ if(o.signal?.aborted||stopped)return {matches,done,total,cancelled:!!o.signal?.aborted,stopped,stopReason:stopReason(),seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)};
  const count=Math.min(target,size-off),t=performance.now();await dispatch(xa,za,width,off,count,ya,yb,n);off+=count;emit();
  const elapsed=performance.now()-t;target=Math.min(262144,Math.max(256,Math.round(target*40/Math.max(1,elapsed)/256)*256));
  await new Promise(r=>setTimeout(r,0));
  }}}}}
- emit();const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:false};
+ emit();const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:false,stopped,stopReason:stopReason()};
  }finally{blockBuffer?.destroy();running=false;}
  },destroy(){device.destroy();}};
 }
 function cpuSolver(requested?:number){
  const adapterInfo={description:'WebAssembly SIMD CPU workers'};
  let running=false;
- return {backend:'wasm',adapterInfo,async search(blocks:Block[],o:SearchOptions){
+ let tuning:any=null;
+ return {backend:'wasm',adapterInfo,get tuning(){return tuning;},async search(blocks:Block[],o:SearchOptions){
  if(running)throw Error('A search is already running.');running=true;
  const pool:Worker[]=[];
  const sharedCancel=globalThis.crossOriginIsolated&&typeof SharedArrayBuffer!=='undefined'?new Int32Array(new SharedArrayBuffer(4)):null;
  const cancel=()=>{if(sharedCancel)Atomics.store(sharedCancel,0,1);};
  o.signal?.addEventListener('abort',cancel,{once:true});
  try{
- const total=validate(blocks,o),matches=[],start=performance.now();let done=0,cursor=0;
+ const total=validate(blocks,o),matches=[],start=performance.now();let done=0;
  // One fixed-y,z row task avoids lossy 64-bit linear indices. Independent workers
  // use transferable result buffers; SAB is not required to use multiple cores.
- const count=Math.max(1,Math.min(8,requested||navigator.hardwareConcurrency||2));
+ const hardware=Math.max(1,Math.floor(navigator.hardwareConcurrency||2));
+ const count=Math.max(1,Math.min(8,hardware,Number.isFinite(requested)?Math.floor(requested!):hardware));
  let nIndex=0,y=o.ymin,z=o.zmin,x=o.xmin,finished=false;
  function next(){
  if(finished||o.signal?.aborted)return null;
@@ -120,14 +125,49 @@ function cpuSolver(requested?:number){
  const blobURL=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));
  const worker=new Worker(blobURL,{type:'module'});URL.revokeObjectURL(blobURL);pool.push(worker);
  await new Promise<void>((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));worker.postMessage({init:true,wasmUrl:new URL('./solver.wasm',import.meta.url).href});});
+ }));
+ const runTask=(worker:Worker,task:any)=>new Promise<{xs:ArrayBuffer;tested?:number}>((res,rej)=>{
+ worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});
+ });
+ let active=count;
+ tuning={workers:count,skipped:total<1000000,cached:false};
+ if(total>=1000000&&!o.signal?.aborted){
+ // Version changes whenever the SIMD kernel or calibration workload changes.
+ // Exact formation and problem shape prevent transferring an early-reject win
+ // to a dense search. Calibration results never count as searched coordinates.
+ const key='grass-cpu-simd-v1:'+JSON.stringify([hardware,count,blocks,o.xmin,o.xmax,o.ymin,o.ymax,o.zmin,o.zmax,o.north]);
+ const candidates=[1,2,4,8].filter(n=>n<=count);
+ let cached:any=null;try{cached=JSON.parse(localStorage.getItem(key)||'null');}catch{}
+ if(cached&&candidates.includes(cached.workers)){active=cached.workers;tuning={...cached,cached:true};}
+ else{
+ const turned=turnBlocks(blocks,o.north[0]),width=o.xmax-o.xmin+1;
+ const jobs=Array.from({length:32},(_,i)=>{const offset=(i*2048)%width;return {x:o.xmin+offset,y:o.ymin,z:o.zmin,count:Math.min(2048,width-offset),blocks:turned};});
+ // All workers are ready before timing, and every candidate scans the same
+ // bounded aggregate jobs using the actual WASM SIMD scan and result transport.
+ await Promise.all(pool.map(w=>o.signal?.aborted?Promise.resolve():runTask(w,{...jobs[0],count:Math.min(4,width)})));
+ const trials:{workers:number;ms:number}[]=[];
+ for(const n of candidates){
+ if(o.signal?.aborted)break;
+ let cursor=0;const before=performance.now();
+ await Promise.all(pool.slice(0,n).map(async w=>{while(!o.signal?.aborted){const job=jobs[cursor++];if(!job)break;await runTask(w,job);}}));
+ if(!o.signal?.aborted)trials.push({workers:n,ms:performance.now()-before});
+ }
+ if(!o.signal?.aborted){
+ const best=trials.reduce((a,b)=>b.ms<a.ms?b:a);active=best.workers;
+ tuning={...best,trials,cached:false,benchmarkCandidates:jobs.reduce((n,t)=>n+t.count,0)};
+ try{localStorage.setItem(key,JSON.stringify(tuning));}catch{}
+ }
+ }
+ }
+ await Promise.all(pool.slice(0,active).map(async worker=>{
  for(;;){const task=next();if(!task)break;
- const r=await new Promise<{xs:ArrayBuffer;tested?:number}>((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
+ const r=await runTask(worker,task);
  for(const mx of new Int32Array(r.xs)){const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);}
  if(matches.length>(o.maxMatches??100000))throw Error('Over 100,000 matches. Add more observations.');
  done+=r.tested??task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});
  }
  }));
- const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!o.signal?.aborted};
+ const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!o.signal?.aborted,tuning};
  }finally{pool.forEach(w=>w.terminate());o.signal?.removeEventListener('abort',cancel);running=false;}
  }};
 }

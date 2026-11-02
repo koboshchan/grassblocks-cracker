@@ -1,5 +1,5 @@
 export interface Block { x:number; y:number; z:number; rotation:number; is_side:number; [key:string]:unknown }
-export interface SearchOptions { xmin:number; xmax:number; ymin:number; ymax:number; zmin:number; zmax:number; north:number[]; signal?:AbortSignal; maxMatches?:number; onProgress?:(p:{done:number;total:number;seconds:number;rate:number})=>void; onMatch?:(m:{x:number;y:number;z:number;north:number})=>void }
+export interface SearchOptions { xmin:number; xmax:number; ymin:number; ymax:number; zmin:number; zmax:number; north:number[]; signal?:AbortSignal; maxMatches?:number; stopOnFirst?:boolean; waitIfPaused?:()=>Promise<void>; onProgress?:(p:{done:number;total:number;seconds:number;rate:number})=>void; onMatch?:(m:{x:number;y:number;z:number;north:number})=>void }
 // Vanilla modern BlockPos#getSeed and Java Random.nextInt(4), integer exact.
 export function rotationBigInt(x:number,y:number,z:number,side=0) {
  let l=BigInt(Math.imul(x,3129871)) ^ (BigInt(z)*116129781n) ^ BigInt(y);
@@ -30,6 +30,7 @@ export function turnBlocks(blocks:Block[],n:number) {
  return blocks.map(b=>{let x=b.x,z=b.z;for(let j=0;j<n;j++)[x,z]=[-z,x];return {...b,x,z,rotation:(b.rotation+n)%(b.is_side?2:4)};});
 }
 export function validate(blocks:Block[],o:SearchOptions) {
+ if(o.maxMatches!==undefined&&(!Number.isInteger(o.maxMatches)||o.maxMatches<1||o.maxMatches>100000))throw Error('Max results must be an integer from1 to100000.');
  if(!blocks.length||blocks.length>512)throw Error('Use 1 to 512 block observations.');
  for(const b of blocks)for(const k of ['x','y','z','rotation','is_side'])if(!Number.isInteger(b[k]))throw Error('Formation values must be integers.');
  for(const b of blocks)if(Math.abs(b.x)>1000000||Math.abs(b.y)>1000000||Math.abs(b.z)>1000000||![0,1].includes(b.is_side)||b.rotation<0||b.rotation>=(b.is_side?2:4))throw Error('Invalid block observation.');
