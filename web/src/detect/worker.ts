@@ -1,9 +1,10 @@
 /// <reference lib="webworker" />
 import { runDetection } from './detect';
 import * as wasm from '../../detect-wasm';
+import {siftSeeds} from './sift';
 
 declare const self: DedicatedWorkerGlobalScope & { cv?: any };
-let cv: any = null, wasmOK = false;
+let cv: any = null, wasmOK = false, sift: any = null;
 
 function post(m: any) { (self as any).postMessage(m); }
 async function init(opencvUrl: string, wasmUrl: string) {
@@ -13,6 +14,11 @@ async function init(opencvUrl: string, wasmUrl: string) {
   if (c instanceof Promise) c = await c;
   if (c && !c.Mat) await new Promise<void>(res => { c.onRuntimeInitialized = () => res(); });
   cv = c;
+  try {
+    const url = new URL('grass-sift.js', opencvUrl);
+    (self as any).importScripts(url.href);
+    sift = await (self as any).GrassSift({locateFile: (name: string) => new URL(name, url).href});
+  } catch (e) { post({type: 'log', text: 'SIFT unavailable, trying binary feature fallback'}); }
 }
 self.onmessage = async (ev: MessageEvent) => {
   const m = ev.data;
@@ -39,6 +45,7 @@ self.onmessage = async (ev: MessageEvent) => {
         wasm.setRefs(refs); wasm.setImage(gray, m.width, m.height);
         hooks.classifyBatch = (q: Float32Array, n: number) => wasm.classifyBatch(q, n);
       }
+      if (sift) hooks.featureSeeds = (cv: any, ctx: any, log: any) => siftSeeds(sift, cv, ctx, log);
       const t0 = performance.now();
       const r = runDetection(cv, img, m.ref, { ...(m.opts || {}), seeds: m.seeds }, (t: string) => post({ type: 'progress', text: t }), hooks);
       post({ type: 'result', result: { ...r, seconds: (performance.now() - t0) / 1000, backend: wasmOK ? wasm.detectorBackend : 'JS' } });

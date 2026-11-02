@@ -119,7 +119,7 @@ function batchClassify(ctx: any, quads: number[][][]): Verdict[] {
 
 /* ---------- context ---------- */
 export function makeContext(img, ref, opts?, hooks?) {
-  return { classifyBatch: hooks && hooks.classifyBatch, onChunk: hooks && hooks.onChunk, w: img.width, h: img.height, g: greenPlane(img), refs: makeRefs(ref), ref, opts: Object.assign({}, DEFAULTS, opts || {}) };
+  return { featureSeeds: hooks && hooks.featureSeeds, classifyBatch: hooks && hooks.classifyBatch, onChunk: hooks && hooks.onChunk, w: img.width, h: img.height, g: greenPlane(img), refs: makeRefs(ref), ref, opts: Object.assign({}, DEFAULTS, opts || {}) };
 }
 
 /* ---------- stage 1: feature seeds (OpenCV.js) ---------- */
@@ -335,7 +335,7 @@ export function runDetection(cv, img, ref, opts, progress?, hooks?) {
     if (!manual) {
       if (!cv) return { blocks: [], reason: 'OpenCV.js unavailable', notes };
       log('finding grass tiles with feature matching');
-      rawSeeds = seedsFromFeatures(cv, ctx, log);
+      rawSeeds = ctx.featureSeeds ? ctx.featureSeeds(cv, ctx, log) : seedsFromFeatures(cv, ctx, log);
     }
     log('verifying ' + rawSeeds.length + ' candidate tile(s)');
     let seeds = rawSeeds.map(q => verify(ctx, q, refine, ctx.opts)).filter(r => r && r.score >= ctx.opts.accept && r.margin >= ctx.opts.acceptMargin && r.votes === 4);
