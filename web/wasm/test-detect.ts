@@ -1,9 +1,9 @@
-// Run with node 24, after preparing local hill fixture paths described in README.
+// Run with Node24 or npx tsx; complete regression fixtures are committed.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
-const f=JSON.parse(fs.readFileSync('/tmp/grass-wasm-fixtures.json','utf8'));
-const gray=new Uint8Array(fs.readFileSync('/tmp/grass-hill-gray.bin'));
+const f=JSON.parse(fs.readFileSync(new URL('../tests/fixtures/detection.json',import.meta.url),'utf8'));
+const gray=new Uint8Array(fs.readFileSync(new URL('../tests/fixtures/hill-gray.bin',import.meta.url)));
 const js=await import('../src/detect/detect.ts');
 const rgba=new Uint8Array(f.w*f.h*4);for(let i=0;i<gray.length;i++)rgba[4*i+1]=gray[i];
 const ctx=js.makeContext({width:f.w,height:f.h,data:rgba},f.ref);
