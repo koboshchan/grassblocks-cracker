@@ -1,0 +1,37 @@
+Baseline before repair
+1920x1080 trapped at wasm-function[41]:0x9bae (same live stack).
+VLFeat planes 1+6+5+10=22, 4x pixels first octave, 4-byte float =352 bytes/input pixel.
+
+1920x1080 safely rejected
+2560x1440 safely rejected
+3840x2160 safely rejected
+1921x1081 safely rejected
+2049x32 safely rejected
+0x32 safely rejected
+-1x32 safely rejected
+256x256 features=3 heap=39059456
+1024x1024 features=128 heap=389021696
+1023x1025 features=164 heap=389021696
+777x513 features=8 heap=389021696
+256x256 features=3 heap=389021696
+256x256 features=3 heap=389021696
+256x256 features=3 heap=389021696
+256x256 features=3 heap=389021696
+PASS oversized, odd widths, max supported pixels, repeated calls, forced OOM recovery
+
+Existing hill full detection regression
+finding grass tiles with feature matching
+SIFT WASM: 466 texture / 11008 image features
+SIFT: 710 ratio-test matches
+SIFT: 16 bounded tile hypotheses
+verifying 16 candidate tile(s)
+growing 5 coplanar seed(s) across the ground plane
+trying 3D voxel lattice for other heights
+3D: initial camera from the ground plane (f=328 px)
+3D round 1: 21591 voxel faces tested, 12 accepted over 3 height level(s)
+3D: camera refit mean reprojection 0.34 px
+3D round 2: 21329 voxel faces tested, 22 accepted over 5 height level(s)
+3D: camera refit mean reprojection 0.19 px
+3D round 3: 21415 voxel faces tested, 22 accepted over 5 height level(s)
+All 22 independently hash-match 3538,90,-455 north 0; automatic anchor is z+1 versus old fixture.
+{"seeds":10,"blocks":22,"notes":["10 verified seed tile(s) from feature matching","plane lattice: 5 coplanar seeds, 5 faces","3D: initial camera from the ground plane (f=328 px)","3D round 1: 21591 voxel faces tested, 12 accepted over 3 height level(s)","3D: camera refit mean reprojection 0.34 px","3D round 2: 21329 voxel faces tested, 22 accepted over 5 height level(s)","3D: camera refit mean reprojection 0.19 px","3D round 3: 21415 voxel faces tested, 22 accepted over 5 height level(s)"]}
