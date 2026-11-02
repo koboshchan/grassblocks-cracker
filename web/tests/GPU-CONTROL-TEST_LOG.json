@@ -1,0 +1,16 @@
+{
+  "limit": {
+    "matches": 7,
+    "done": 6144,
+    "total": 197292
+  },
+  "first": {
+    "matches": 1,
+    "done": 6144
+  },
+  "pauseCancel": {
+    "done": 0,
+    "cancelled": true
+  },
+  "pass": true
+}
