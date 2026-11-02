@@ -1,0 +1,19 @@
+{
+  "name": "grassblocks-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && sh -c 'if [ \"$PREBUILT_WASM\" != 1 ]; then npm run build:wasm; fi' && tsx scripts/build.ts",
+    "build:webgpu": "tsx scripts/build-webgpu.ts",
+    "build:wasm": "sh scripts/build-wasm.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@webgpu/types": "0.1.74",
+    "esbuild": "0.28.2",
+    "tsx": "^4.20.0",
+    "typescript": "7.0.2"
+  }
+}

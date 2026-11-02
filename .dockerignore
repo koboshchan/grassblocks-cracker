@@ -1,0 +1,9 @@
+.git
+**/node_modules
+**/dist
+**/artifacts
+web/tests
+web/native
+web/*.js
+**/*.log
+reference

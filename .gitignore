@@ -4,3 +4,5 @@ web/dist/
 web/.build/
 web/*.js
 web/wasm/**/target/
+
+web/artifacts/

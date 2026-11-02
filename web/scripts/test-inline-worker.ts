@@ -1,0 +1,11 @@
+import {build} from 'esbuild';
+import {Worker} from 'node:worker_threads';
+import {readFile} from 'node:fs/promises';
+const b=await build({entryPoints:['solver-worker.ts'],bundle:true,minify:true,format:'esm',write:false});
+const wasm=await readFile('artifacts/solver.wasm');
+const source="const {parentPort}=require('node:worker_threads');globalThis.onmessage=null;globalThis.postMessage=(m)=>parentPort.postMessage(m);parentPort.on('message',data=>onmessage({data}));"+b.outputFiles[0].text;
+const w=new Worker(source,{eval:true});
+let phase=0;
+const timer=setTimeout(()=>{w.terminate();throw Error('Worker timeout');},10000);
+w.on('message',m=>{if(m.error)throw Error(m.error);if(!phase++){w.postMessage({x:3538,y:90,z:-454,count:1,blocks:[{x:0,y:0,z:0,rotation:2,is_side:0}]});}else{console.log('Inline WASM worker init/scan passed',m);clearTimeout(timer);w.terminate();}});
+w.postMessage({init:true,wasmUrl:'data:application/wasm;base64,'+wasm.toString('base64')});
