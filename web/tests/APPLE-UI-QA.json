@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-01",
+  "browser": "Linux Chromium software rendering, no hardware WebGPU claim",
+  "pass": [
+    "Auto real hill.png uploaded with empty rows exported22; expected z+1 anchor shift accepted",
+    "Fresh-context Manual Grow terminal ready22 blocks,5 height levels, no forEach error",
+    "Auto/Manual toggle",
+    "Manual Add face preserves rows and explicit height9 rotation2",
+    "390px document width390",
+    "CPU max7 returns7, stop-first returns1",
+    "Pause progress stable603/161604, resume and cancel while paused",
+    "CPU fixture3538,90,-454 inclusive bounds",
+    "22row export/import",
+    "Invalid bounds rejected",
+    "6native links200"
+  ],
+  "failed": [],
+  "screenshots": [
+    "/tmp/grass-ui-qa/auto-desktop.png",
+    "/tmp/grass-ui-qa/auto-mobile.png",
+    "/tmp/grass-ui-qa/manual.png"
+  ],
+  "formation": "/tmp/grass-ui-qa/auto-hill-formation.txt"
+}
