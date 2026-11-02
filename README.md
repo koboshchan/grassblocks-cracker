@@ -11,3 +11,5 @@ Native build instructions and exact regression logs are in cuda/README.md and me
 The hill regression has22 observations and the candidate3538,90,-454,north0. A match is evidence only inside the explicitly searched inclusive bounds, not a unique world-wide location proof. The hill example includes previously calibrated geometry and is labeled as such. Automatic geometry on arbitrary perspective terrain can require a manual quad and height corrections. Review observations before an expensive search.
 
 See web/tests/RESEARCH.md for portable64-bit WGSL arithmetic decisions and test coverage. A32-bit-only hash is not correct for modern vanilla rotations. The polynomial's bits16..63 are relevant; its high word cannot be dropped. Floating-point fast-math cannot improve this integer hash.
+
+The implemented hash is the modern vanilla getSeed plus Java Random rotation path. A separate legacy/Sodium-specific algorithm selector is not implemented. The known hill observations pass this vanilla path. Do not assume a screenshot made with a different resource pack or changed renderer rotation algorithm is supported.
