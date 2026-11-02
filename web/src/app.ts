@@ -48,7 +48,7 @@ function runDetect(seeds?: any) {
   worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value) } }, [id.data.buffer]);
 }
 $('#btnAuto').onclick = () => runDetect();
-$('#btnGrow').onclick = () => runDetect([{ quad: quad.map(p => p.slice()), manual: true }]);
+$('#btnGrow').onclick = () => runDetect([quad.map(p => p.slice())]);
 
 /* image loading */
 async function load(src: Blob | string) {
