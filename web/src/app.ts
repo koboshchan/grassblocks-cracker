@@ -136,7 +136,7 @@ function upd() {
   $('#btnRun').disabled = !blocks.some(b => b.include) || running;
   const b = bounds(), n = norths(); $('#cmd').classList.toggle('on', blocks.length > 0);
   const r = [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
-  $('#cmd').textContent = 'cuda:  grass_solver.exe ' + r + '\nmetal: ./grass_solver ' + r + '\n(run once per formation-north*.txt, copied to formation.txt; norths ' + n.join(',') + ')';
+  $('#cmd').textContent = 'cuda:  grass_solver.exe --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nmetal: ./grass_solver --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nNative solvers read the same raw formation.txt as browser mode.' + (n.length > 1 && n.length < 4 ? '\nRepeat with --north ' + n.slice(1).join(' and --north ') + ' for the other selected orientations.' : '');
   $('#btnAddFace').disabled = quad.length < 4 || !ready || !img;
 }
 document.querySelectorAll('.group input,.n').forEach(e => e.addEventListener('input', upd));
@@ -156,13 +156,13 @@ $('#btnRun').onclick = async () => {
   const mm = maxRes(); if (mm === null) { $('#runStats').textContent = 'Max results must be a whole number from 1 to 100000.'; return; }
   const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick WASM or use the native download below.'; return; }
   if (!norths().length) { $('#runStats').textContent = 'Choose at least one north.'; return; }
-  abort = new AbortController(); running = true; paused = false; activeMs = 0; lastTick = performance.now(); lock(true);
+  abort = new AbortController(); running = true; paused = false; ['sPct','sPos','sRate','sEta','sEl'].forEach(id => $('#' + id).textContent = '-'); activeMs = 0; lastTick = performance.now(); lock(true);
   $('#btnRun').disabled = true; $('#btnCancel').disabled = false; $('#btnPause').disabled = false; $('#btnPause').textContent = 'Pause'; $('#matches').innerHTML = ''; $('#runBar').hidden = false; $('#runBar i').style.width = '0'; $('#sMatch').textContent = '0'; $('#runStats').textContent = 'Running'; setStatus('searching', 'busy');
   ticker = setInterval(tick, 250) as any; let nm = 0;
   try {
-    if (!solver || solver.__be !== be) { solver = await createSolver({ backend: be }); solver.__be = be; }
+    if (!solver || solver.__be !== be) { solver?.destroy?.(); solver = null; solver = await createSolver({ backend: be }); solver.__be = be; }
     const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal, maxMatches: mm, stopOnFirst: $('#stopFirst').checked, waitIfPaused: () => pausePromise || Promise.resolve(),
-      onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); const rate = p.rate || (p.done / Math.max(1e-6, activeMs / 1000)); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
+      onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); tick(); const rate = p.done / Math.max(1e-6, activeMs / 1000); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
       onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { const li = document.createElement('li'); li.textContent = JSON.stringify(m); $('#matches').appendChild(li); } } });
     tick(); $('#sMatch').textContent = String(r.matches.length);
     $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + '. ' + r.matches.length + ' match(es).';
