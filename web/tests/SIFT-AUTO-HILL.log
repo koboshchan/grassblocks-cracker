@@ -1,0 +1,19 @@
+
+  ../../../../tmp/grass-sift-auto.mjs  31.4kb
+
+⚡ Done in 38ms
+finding grass tiles with feature matching
+SIFT WASM: 466 texture / 11008 image features
+SIFT: 710 ratio-test matches
+SIFT: 16 bounded tile hypotheses
+verifying 16 candidate tile(s)
+growing 5 coplanar seed(s) across the ground plane
+trying 3D voxel lattice for other heights
+3D: initial camera from the ground plane (f=328 px)
+3D round 1: 21591 voxel faces tested, 12 accepted over 3 height level(s)
+3D: camera refit mean reprojection 0.34 px
+3D round 2: 21329 voxel faces tested, 22 accepted over 5 height level(s)
+3D: camera refit mean reprojection 0.19 px
+3D round 3: 21415 voxel faces tested, 22 accepted over 5 height level(s)
+All 22 independently hash-match 3538,90,-455 north 0; automatic anchor is z+1 versus old fixture.
+{"seeds":10,"blocks":22,"notes":["10 verified seed tile(s) from feature matching","plane lattice: 5 coplanar seeds, 5 faces","3D: initial camera from the ground plane (f=328 px)","3D round 1: 21591 voxel faces tested, 12 accepted over 3 height level(s)","3D: camera refit mean reprojection 0.34 px","3D round 2: 21329 voxel faces tested, 22 accepted over 5 height level(s)","3D: camera refit mean reprojection 0.19 px","3D round 3: 21415 voxel faces tested, 22 accepted over 5 height level(s)"]}

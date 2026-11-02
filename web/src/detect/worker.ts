@@ -50,5 +50,5 @@ self.onmessage = async (ev: MessageEvent) => {
       const r = runDetection(cv, img, m.ref, { ...(m.opts || {}), seeds: m.seeds }, (t: string) => post({ type: 'progress', text: t }), hooks);
       post({ type: 'result', result: { ...r, seconds: (performance.now() - t0) / 1000, backend: wasmOK ? wasm.detectorBackend : 'JS' } });
     }
-  } catch (e: any) { post({ type: 'error', text: String(e && e.message || e) }); }
+  } catch (e: any) { post({ type: 'error', text: String(e && e.stack || e && e.message || e) }); }
 };

@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 # Preparation decodes pixels only; never reads precomputed face/camera/seed JSON.
-python3 - <<'PY'
+${PYTHON:-python3} - <<'PY'
 import cv2 as cv,json
 im=cv.imread('public/examples/hill.png');ref=cv.imread('public/grass_block_top.png',0)
 open('/tmp/grass-hill-gray.bin','wb').write(im[:,:,1].tobytes())
