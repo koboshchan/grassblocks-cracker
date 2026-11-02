@@ -1,3 +1,4 @@
+import workerSource from './solver-worker.ts?worker';
 import {turnBlocks,validate,type Block,type SearchOptions} from './hash';
 export async function createSolver({backend='auto',workers}:{backend?:'auto'|'cpu'|'gpu';workers?:number}={}) {
  if(backend!=='cpu'&&navigator.gpu) {
@@ -23,7 +24,7 @@ async function gpuSolver(){
  const result=device.createBuffer({size:resultSize,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
  const read=device.createBuffer({size:resultSize,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
  const params=device.createBuffer({size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
- const adapterInfo=adapter.info||{};
+ const rawInfo=adapter.info||{};const adapterInfo={vendor:rawInfo.vendor||'',architecture:rawInfo.architecture||'',device:rawInfo.device||'',description:rawInfo.description||''};
  let codeHash=0;for(const c of code)codeHash=(Math.imul(codeHash,31)+c.charCodeAt(0))|0;
  const cacheKey='grass-wgsl-tune-v2:'+JSON.stringify(adapterInfo)+':'+codeHash;
  let running=false;
@@ -116,8 +117,9 @@ function cpuSolver(requested?:number){
  return task;
  }
  await Promise.all(Array.from({length:count},async()=>{
- const worker=new Worker(new URL('./solver-worker.ts',import.meta.url),{type:'module'});pool.push(worker);
- await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));});
+ const blobURL=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));
+ const worker=new Worker(blobURL,{type:'module'});URL.revokeObjectURL(blobURL);pool.push(worker);
+ await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));worker.postMessage({init:true,wasmUrl:new URL('./solver.wasm',import.meta.url).href});});
  for(;;){const task=next();if(!task)break;
  const r=await new Promise((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});});
  for(const mx of new Int32Array(r.xs)){const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);}
