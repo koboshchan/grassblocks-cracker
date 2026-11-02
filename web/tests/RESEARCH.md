@@ -13,4 +13,4 @@ Only polynomial bits16..63 are needed. The final Java48 LCG only needs bits46..4
 
 These are correctness and operation-count choices, not an unmeasured claim that this is fastest across every browser driver. The actual end-to-end GPU rate includes dispatch/readback and is recorded separately. Metal-native3B/s is historical, not a browser benchmark.
 
-Independent exact tests compare pair32 JS and WASM scalar/SIMD with arbitrary-precision Java-semantics reference on100000 random signed32 coords and400000 SIMD lanes; GPU fixture uses65536 random signed32 coords on the actual device. Native CUDA/Metal tests use independent Python oracle including5043 dense matches and signed-wrap cases.
+Independent exact tests compare pair32 JS and WASM scalar/SIMD with arbitrary-precision Java-semantics reference on100000 random signed32 coords and800000 SIMD lanes; GPU fixture uses65536 random signed32 coords on the actual device. Native CUDA/Metal tests use independent Python oracle including5043 dense matches and signed-wrap cases.

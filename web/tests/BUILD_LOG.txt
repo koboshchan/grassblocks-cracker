@@ -1,0 +1,7 @@
+npm ci audited 9 packages, zero vulnerabilities.
+npm run typecheck passed TypeScript 7.0.2 with @webgpu/types 0.1.74.
+npm run build passed esbuild 0.28.2. Single minified app.js contains CPU WASM module worker and detection classic worker as inline Blob source strings; no emitted worker JS.
+Both worker imports supported: .ts?worker and inline-worker:.
+Index output script type=module.
+WASM C rebuild uses SIMD, -fwrapv on CPU solver, no stale root artifacts copied over prebuilt dist assets.
+Docker build/runtime proof pending in /tmp/grass-webgpu-docker-build.log.

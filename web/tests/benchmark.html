@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>Solver correctness and benchmark</title><pre id="out">Running</pre><script type="module">
+import {createSolver} from '../solver.js';
+import {rotationBigInt} from '../hash.js';
+const out=document.querySelector('#out');
+const results={};
+try{
+const text=await (await fetch('./hill.txt')).text();const ls=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#'));const blocks=ls.slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side};});
+for(const b of blocks)if(rotationBigInt(3538+b.x,90+b.y,-454+b.z,b.is_side)!==b.rotation)throw Error('Hill fixture mismatch');
+const solver=await createSolver({backend:'gpu'});results.adapter=solver.adapterInfo;
+results.small=await solver.search(blocks,{xmin:3500,xmax:3580,zmin:-490,zmax:-420,ymin:70,ymax:110,north:[0,1,2,3]});
+if(!results.small.matches.some(m=>m.x===3538&&m.y===90&&m.z===-454&&m.north===0))throw Error('Hill candidate missing');
+results.speed=await solver.search(blocks,{xmin:-1000,xmax:1000,zmin:-1000,zmax:1000,ymin:-64,ymax:319,north:[0]});
+if(new URLSearchParams(location.search).has('full'))results.full=await solver.search(blocks,{xmin:-5000,xmax:5000,zmin:-5000,zmax:5000,ymin:-64,ymax:319,north:[0,1,2,3]});
+out.textContent=JSON.stringify(results,null,2);document.title='PASS';
+}catch(e){out.textContent=JSON.stringify({error:e.message,stack:e.stack,results},null,2);document.title='FAIL';}
+</script>

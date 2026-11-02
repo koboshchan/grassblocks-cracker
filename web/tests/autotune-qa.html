@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>Autotuned GPU QA</title><pre id="out">running</pre><script type="module">
+import {createSolver} from '../solver.js';
+import {rotationBigInt} from '../hash.js';
+let out=document.querySelector('#out'),result={};
+try {
+ const a=await navigator.gpu.requestAdapter({powerPreference:'high-performance'}), i=a.info;
+ const info={vendor:i.vendor||'',architecture:i.architecture||'',device:i.device||'',description:i.description||''};
+ const code=await (await fetch('../kernel.wgsl',{cache:'no-store'})).text();let hash=0;for(const c of code)hash=(Math.imul(hash,31)+c.charCodeAt(0))|0;
+ let hashSha=[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(code)))].map(x=>x.toString(16).padStart(2,'0')).join('');
+ let key='grass-wgsl-tune-v2:'+JSON.stringify(info)+':'+hash;
+ result.adapter=info;result.sha256=hashSha;
+ const text=await(await fetch('./hill.txt',{cache:'no-store'})).text();
+ let blocks=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#')).slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side}});
+ const full={xmin:-5000,xmax:5000,zmin:-5000,zmax:5000,ymin:-64,ymax:319,north:[0,1,2,3]};
+ localStorage.removeItem(key);
+ let cold=await createSolver({backend:'gpu'});result.coldFull=await cold.search(blocks,full);result.coldTuning=cold.tuning;
+ if(result.coldFull.done!==result.coldFull.total||!result.coldFull.matches.some(m=>m.x===3538&&m.y===90&&m.z===-454&&m.north===0))throw Error('cold full failed');
+ cold.destroy();
+ let warm=await createSolver({backend:'gpu'}); result.warmSpeed=await warm.search(blocks,{xmin:-1000,xmax:1000,zmin:-1000,zmax:1000,ymin:-64,ymax:319,north:[0]});result.warmTuning=warm.tuning;warm.destroy();
+ const testBlocks=[{x:0,y:0,z:0,rotation:0,is_side:0}];
+ const opts={xmin:-64,xmax:63,zmin:-24,zmax:23,ymin:-16,ymax:15,north:[0],maxMatches:1000000};
+ const expected=[];for(let z=opts.zmin;z<=opts.zmax;z++)for(let x=opts.xmin;x<=opts.xmax;x++)for(let y=opts.ymin;y<=opts.ymax;y++)if(rotationBigInt(x,y,z)===0)expected.push(x+','+y+','+z+',0');
+ expected.sort();
+ const hillOpts={xmin:3500,xmax:3580,zmin:-490,zmax:-420,ymin:70,ymax:110,north:[0,1,2,3]};
+ result.variants=[];
+ for(const wg of [64,128,256])for(const items of [1,2,4]){
+  localStorage.setItem(key,JSON.stringify({wg,items,ms:0}));
+  let s=await createSolver({backend:'gpu'}), h=await s.search(blocks,hillOpts), o=await s.search(testBlocks,opts), actual=o.matches.map(m=>m.x+','+m.y+','+m.z+','+m.north).sort();
+  if(h.matches.length!==1||h.matches[0].x!==3538||h.matches[0].y!==90||h.matches[0].z!==-454||h.matches[0].north!==0)throw Error('hill mismatch wg='+wg+' items='+items+' '+JSON.stringify(h.matches));
+  if(actual.length!==expected.length||actual.some((x,j)=>x!==expected[j]))throw Error('overflow mismatch wg='+wg+' items='+items+' actual='+actual.length+' expected='+expected.length);
+  result.variants.push({wg,items,hill:'PASS',overflow:'PASS',matches:actual.length,positions:o.done,tuning:s.tuning});s.destroy();
+ }
+ localStorage.removeItem(key);out.textContent=JSON.stringify(result,null,2);document.title='PASS';
+}catch(e){out.textContent=JSON.stringify({error:e.message,stack:e.stack,result},null,2);document.title='FAIL';}
+</script>

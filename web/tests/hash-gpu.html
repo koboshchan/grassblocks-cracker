@@ -1,0 +1,17 @@
+<!doctype html><meta charset="utf-8"><title>GPU hash test</title><pre id="out">running</pre><script type="module">
+import {rotationBigInt} from '../hash.js';
+const results={};try{
+const ad=await navigator.gpu.requestAdapter();const d=await ad.requestDevice();const source=await(await fetch('../kernel.wgsl')).text();
+const funcs=source.slice(0,source.indexOf('struct Block'));
+const module=d.createShaderModule({code:funcs+`
+@group(0) @binding(0) var<storage,read> coords:array<vec4<i32>>;
+@group(0) @binding(1) var<storage,read_write> answer:array<u32>;
+@compute @workgroup_size(256) fn check(@builtin(global_invocation_id) id:vec3<u32>){if(id.x<arrayLength(&answer)){let p=coords[id.x];answer[id.x]=rotation(p.x,p.y,p.z);}}
+`});const errors=(await module.getCompilationInfo()).messages.filter(e=>e.type==='error');if(errors.length)throw Error(JSON.stringify(errors));
+const n=65536,coords=new Int32Array(n*4);let s=1;for(let i=0;i<n*4;i++){s=(Math.imul(s,1664525)+1013904223)>>>0;coords[i]=s|0;}
+const cb=d.createBuffer({size:coords.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});d.queue.writeBuffer(cb,0,coords);
+const ob=d.createBuffer({size:n*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});const rb=d.createBuffer({size:n*4,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+const p=await d.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'check'}});const group=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:cb}},{binding:1,resource:{buffer:ob}}]});
+const e=d.createCommandEncoder();const pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,group);pass.dispatchWorkgroups(n/256);pass.end();e.copyBufferToBuffer(ob,0,rb,0,n*4);d.queue.submit([e.finish()]);await rb.mapAsync(GPUMapMode.READ);const a=new Uint32Array(rb.getMappedRange());for(let i=0;i<n;i++)if(a[i]!==rotationBigInt(coords[i*4],coords[i*4+1],coords[i*4+2]))throw Error('Mismatch at '+i);results.pass=n;results.adapter=ad.info;document.title='PASS';document.querySelector('#out').textContent=JSON.stringify(results,null,2);
+}catch(e){document.title='FAIL';document.querySelector('#out').textContent=JSON.stringify({error:e.message,stack:e.stack},null,2);}
+</script>

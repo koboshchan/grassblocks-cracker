@@ -6,3 +6,6 @@ web/*.js
 web/wasm/**/target/
 
 web/artifacts/
+
+web/tests/*.bundle
+web/native/

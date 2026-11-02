@@ -1,0 +1,15 @@
+Static browser application
+
+Build locally with npm ci && npm run build from this folder, with Node24 and clang/lld available. npm run typecheck validates the plain TypeScript sources. The application uses no frontend framework. dist is the complete static site. Serve with python3 serve.py --port 18643, or any HTTPS static host. WebGPU requires a secure context. COOP same-origin and COEP require-corp enable cross-origin isolation and SharedArrayBuffer; the CPU fallback still uses independent SIMD workers if those headers are unavailable.
+
+Docker build from the monorepo root uses docker build -f web/Dockerfile -t grassblocks-web . and docker run --rm -p 18643:80 grassblocks-web. Four independent build products are compiled before assembly: detection WASM, CPU cracking WASM, validated/minified WebGPU shader plus its TypeScript host, and the TypeScript UI bundle. The shader stage validates with pinned Naga before and after minification. Final nginx serves only static assets, with correct WASM MIME and isolation headers. No image or search request goes to a server.
+
+npm run build emits one minified app.js containing both worker source strings, plus the SIMD WASM modules, WGSL, texture, example fixtures and native source downloads. OpenCV feature detection is self-hosted, including its WASM runtime, and loaded lazily only for automatic geometry. Pixel projection/correlation and the CPU solver run in the small standalone SIMD WASM modules.
+
+Flow is screenshot selection, automatic feature geometry or a manual four-corner grass tile, correlation-verified grass observations, manual height/rotation review, and then browser GPU/CPU search or a native download. An arbitrary perspective screenshot is not guaranteed to yield automatic seeds. The Hill example is explicitly a saved calibration regression, not a claim that its geometry was detected automatically in this browser.
+
+formation.txt retains the existing count followed by x y z rotation is_side rows. Comments can follow the count or rows. Excluded observations are omitted. y is a per-observation relative height. Export does not rotate the formation; select --north all in the native CLI to search all compass directions. Browser north labels and native north labels agree.
+
+GPU autotuning compares workgroups64/128/256 with1/2/4 candidates per invocation, caches by explicit adapter fields and shader fingerprint, and uses integer-only u32-pair64-bit arithmetic. No portable WGSL shader-int64 extension is assumed. CPU WASM runs up to8 workers with a SIMD first-rejection stage. Cancellation occurs at bounded task/dispatch boundaries. Result overflow recursively divides a GPU chunk; there is no silently truncated4096-match cap. Very weak formations stop with an explicit too-many-matches error.
+
+Tests are under tests/. Hash tests use an independent BigInt oracle. Native tests include both signs of int32 coordinates, side textures and all north transforms. A search match is only a candidate inside the stated inclusive bounds.
