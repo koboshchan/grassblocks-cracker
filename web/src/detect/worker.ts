@@ -18,6 +18,16 @@ self.onmessage = async (ev: MessageEvent) => {
   const m = ev.data;
   try {
     if (m.type === 'init') { await init(m.opencvUrl, m.wasmUrl); post({ type: 'ready', backend: wasmOK ? wasm.detectorBackend : 'JS' }); return; }
+    if (m.type === 'classifyQuad') {
+      const d = new Uint8ClampedArray(m.buffer), gray = new Uint8Array(m.width * m.height);
+      for (let i = 0; i < gray.length; i++) gray[i] = d[4 * i + 1];
+      const refs = new Uint8Array(1024);
+      for (let k = 0; k < 4; k++) for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { let xx = x, yy = y; for (let j = 0; j < k; j++) { const t = xx; xx = yy; yy = 15 - t; } refs[k * 256 + y * 16 + x] = m.ref[yy][xx]; }
+      if (!wasmOK) { post({ type: 'error', text: 'WASM classifier unavailable' }); return; }
+      wasm.setRefs(refs); wasm.setImage(gray, m.width, m.height);
+      const o = wasm.classifyBatch(new Float32Array(m.quad.flat()), 1);
+      post({ type: 'quadResult', ok: o[0] === 1, rotation: o[1], score: o[2], margin: o[3], votes: o[4] }); return;
+    }
     if (m.type === 'detect') {
       const img = { width: m.width, height: m.height, data: new Uint8ClampedArray(m.buffer) };
       const hooks: any = { onChunk: (d: number, t: number) => post({ type: 'progress', text: 'correlating ' + d + ' / ' + t + ' candidate faces', fraction: d / t }) };

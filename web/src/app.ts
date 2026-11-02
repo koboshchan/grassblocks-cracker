@@ -127,26 +127,63 @@ function refresh() { table(); draw(); upd(); }
 /* search */
 function norths() { return [...document.querySelectorAll('.n')].filter((c: any) => c.checked).map((c: any) => +c.value); }
 function bounds() { const g = (id: string) => +$('#' + id).value; return { xmin: g('xmin'), xmax: g('xmax'), ymin: g('ymin'), ymax: g('ymax'), zmin: g('zmin'), zmax: g('zmax') }; }
+const SET = '.group input,.group select,.chip,#tbl input,#tbl button,#btnAdd,#btnImport';
+let running = false, paused = false, resumeFn: (() => void) | null = null, pausePromise: Promise<void> | null = null, activeMs = 0, lastTick = 0, ticker = 0;
+function fmt(s: number) { if (!isFinite(s)) return '-'; s = Math.round(s); return s >= 3600 ? Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm' : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+function lock(b: boolean) { document.querySelectorAll(SET).forEach((e: any) => e.disabled = b); $('#nAny').disabled = b; document.querySelectorAll('.n').forEach((e: any) => e.disabled = b); $('#stopFirst').disabled = b; }
+function maxRes() { const n = +$('#maxres').value; return Number.isInteger(n) && n >= 1 && n <= 100000 ? n : null; }
 function upd() {
-  $('#btnRun').disabled = !blocks.some(b => b.include) || !!abort;
+  $('#btnRun').disabled = !blocks.some(b => b.include) || running;
   const b = bounds(), n = norths(); $('#cmd').classList.toggle('on', blocks.length > 0);
-  const ns = n.length === 4 ? 'all' : n.length === 1 ? String(n[0]) : 'all';
-  const args = ' --formation formation.txt --north ' + ns + ' ' + [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
-  $('#cmd').textContent = 'cuda   grass_solver.exe' + args + '\nmetal  ./grass_solver' + args + (n.length > 1 && n.length < 4 ? '\nNative command searches all four norths; browser selection is a subset.' : '');
+  const r = [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
+  $('#cmd').textContent = 'cuda:  grass_solver.exe ' + r + '\nmetal: ./grass_solver ' + r + '\n(run once per formation-north*.txt, copied to formation.txt; norths ' + n.join(',') + ')';
+  $('#btnAddFace').disabled = quad.length < 4 || !ready || !img;
 }
-document.querySelectorAll('.bounds input,.n').forEach(e => e.addEventListener('input', upd));
+document.querySelectorAll('.group input,.n').forEach(e => e.addEventListener('input', upd));
+$('#nAny').onchange = (e: any) => document.querySelectorAll('.n').forEach((c: any) => c.checked = e.target.checked);
+document.querySelectorAll('.n').forEach((c: any) => c.addEventListener('change', () => { $('#nAny').checked = norths().length === 4; }));
+$('#nAny').checked = true;
 document.querySelectorAll('.chip').forEach((c: any) => c.onclick = () => { const r = +c.dataset.r; ['xmin', 'zmin'].forEach(i => $('#' + i).value = -r); ['xmax', 'zmax'].forEach(i => $('#' + i).value = r); upd(); });
-$('#btnCancel').onclick = () => abort?.abort();
-$('#btnRun').onclick = async () => {
-  const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick CPU or use the native download below.'; return; }
-  abort = new AbortController(); $('#btnRun').disabled = true; $('#btnCancel').disabled = false; $('#matches').innerHTML = ''; $('#runBar').hidden = false; setStatus('searching', 'busy');
-  try {
-    if (!solver || solver.__be !== be) { solver?.destroy?.(); solver = await createSolver({ backend: be }); solver.__be = be; } const t0 = performance.now();
-    const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal,
-      onProgress: (p: any) => { $('#runBar i').style.width = (100 * p.done / p.total) + '%'; $('#runStats').textContent = (100 * p.done / p.total).toFixed(1) + '%  ' + (p.rate / 1e9).toFixed(2) + ' G/s  ' + p.seconds.toFixed(1) + 's  ' + (solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '')); },
-      onMatch: (m: any) => { const li = document.createElement('li'); li.textContent = JSON.stringify(m); $('#matches').appendChild(li); } });
-    $('#runStats').textContent = (r.cancelled ? 'cancelled' : 'done') + ': ' + r.matches.length + ' match(es), ' + r.seconds.toFixed(1) + 's';
-  } catch (e: any) { $('#runStats').textContent = 'error: ' + (e.message || e); }
-  abort = null; $('#btnCancel').disabled = true; $('#runBar').hidden = true; setStatus('ready', 'ok'); upd();
+function tick() { const now = performance.now(); if (!paused) activeMs += now - lastTick; lastTick = now; $('#sEl').textContent = fmt(activeMs / 1000) + (paused ? ' (paused)' : ''); }
+$('#btnPause').onclick = () => {
+  if (!running) return;
+  if (!paused) { paused = true; pausePromise = new Promise<void>(r => { resumeFn = r; }); $('#btnPause').textContent = 'Resume'; setStatus('paused', ''); $('#runStats').textContent = 'Paused'; }
+  else { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; $('#btnPause').textContent = 'Pause'; setStatus('searching', 'busy'); }
+  tick();
 };
+$('#btnCancel').onclick = () => { abort?.abort(); if (paused) { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; } };
+$('#btnRun').onclick = async () => {
+  const mm = maxRes(); if (mm === null) { $('#runStats').textContent = 'Max results must be a whole number from 1 to 100000.'; return; }
+  const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick WASM or use the native download below.'; return; }
+  if (!norths().length) { $('#runStats').textContent = 'Choose at least one north.'; return; }
+  abort = new AbortController(); running = true; paused = false; activeMs = 0; lastTick = performance.now(); lock(true);
+  $('#btnRun').disabled = true; $('#btnCancel').disabled = false; $('#btnPause').disabled = false; $('#btnPause').textContent = 'Pause'; $('#matches').innerHTML = ''; $('#runBar').hidden = false; $('#runBar i').style.width = '0'; $('#sMatch').textContent = '0'; $('#runStats').textContent = 'Running'; setStatus('searching', 'busy');
+  ticker = setInterval(tick, 250) as any; let nm = 0;
+  try {
+    if (!solver || solver.__be !== be) { solver = await createSolver({ backend: be }); solver.__be = be; }
+    const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal, maxMatches: mm, stopOnFirst: $('#stopFirst').checked, waitIfPaused: () => pausePromise || Promise.resolve(),
+      onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); const rate = p.rate || (p.done / Math.max(1e-6, activeMs / 1000)); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
+      onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { const li = document.createElement('li'); li.textContent = JSON.stringify(m); $('#matches').appendChild(li); } } });
+    tick(); $('#sMatch').textContent = String(r.matches.length);
+    $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + '. ' + r.matches.length + ' match(es).';
+    if (!r.cancelled && !r.stopped) $('#sPct').textContent = '100%';
+  } catch (e: any) { $('#runStats').textContent = 'Error: ' + (e.message || e); }
+  clearInterval(ticker); running = false; paused = false; abort = null; pausePromise = null; lock(false);
+  $('#btnCancel').disabled = true; $('#btnPause').disabled = true; $('#btnPause').textContent = 'Pause'; $('#runBar').hidden = true; setStatus('ready', 'ok'); upd();
+};
+
+/* mode + manual single face */
+function setMode(m: string) { document.body.dataset.mode = m; $('#modeAuto').setAttribute('aria-selected', String(m === 'auto')); $('#modeManual').setAttribute('aria-selected', String(m === 'manual')); }
+$('#modeAuto').onclick = () => setMode('auto'); $('#modeManual').onclick = () => setMode('manual');
+$('#btnAddFace').onclick = () => {
+  if (!img || quad.length < 4 || !worker) return;
+  const cv2 = document.createElement('canvas'); cv2.width = img.width; cv2.height = img.height; const x = cv2.getContext('2d')!; x.drawImage(img as any, 0, 0); const id = x.getImageData(0, 0, cv2.width, cv2.height);
+  $('#btnAddFace').disabled = true;
+  const prev = worker.onmessage!; worker.onmessage = e => { if (e.data.type === 'quadResult' || e.data.type === 'error') { worker!.onmessage = prev; const m = e.data;
+      if (m.type === 'error') { log('classify: ' + m.text); upd(); return; }
+      blocks.push({ x: Math.round(+$('#mx').value), y: Math.round(+$('#my').value), z: Math.round(+$('#mz').value), rotation: m.rotation & 3, is_side: 0, include: true, score: m.score, quad: quad.map(p => p.slice()) });
+      log('added face, rotation ' + m.rotation + ', score ' + m.score.toFixed(2) + (m.ok && m.score > 0.7 ? '' : ' (weak match, check the quad corners and edit rot in the table)')); quad = []; refresh(); } else prev.call(worker, e); };
+  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
+};
+setMode('auto');
 texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();

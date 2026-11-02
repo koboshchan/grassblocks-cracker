@@ -13,6 +13,7 @@
   <div class="status" id="status"><span class="dot" id="dot"></span><span id="statusText">starting</span></div>
 </header>
 
+<div class="seg" role="tablist" aria-label="Mode"><button role="tab" id="modeAuto" aria-selected="true">Auto</button><button role="tab" id="modeManual" aria-selected="false">Manual</button></div>
 <main class="layout">
   <section class="stage" aria-label="Screenshot">
     <div class="toolbar">
@@ -20,8 +21,8 @@
       <input id="file" type="file" accept="image/*" hidden>
       <button id="btnHill" class="btn ghost" title="Loads a known fixture with a stored 22-face formation. It is not produced by the auto detector.">Hill example (fixture)</button>
       <span class="sep"></span>
-      <button id="btnQuad" class="btn ghost" aria-pressed="false">Draw tile quad</button>
-      <button id="btnClearQuad" class="btn ghost">Clear quad</button>
+      <button id="btnQuad" data-mode="manual" class="btn ghost" aria-pressed="false">Draw tile quad</button>
+      <button id="btnClearQuad" data-mode="manual" class="btn ghost">Clear quad</button>
       <span class="hint" id="hint">Drop an image anywhere</span>
     </div>
     <div class="canvasWrap" id="wrap">
@@ -35,11 +36,10 @@
     <section class="card" id="stepDetect">
       <h2><b>1</b> Detect</h2>
       <p class="small">Automatic mode matches features against the vanilla 16x16 texture, then verifies every face by pixel correlation. It can fail on hard shots. Then draw one tile quad (click its 4 corners, then drag to adjust) and grow from it.</p>
-      <div class="row">
-        <button id="btnAuto" class="btn primary" disabled>Auto detect</button>
-        <button id="btnGrow" class="btn" disabled>Grow from quad</button>
-      </div>
-      <div class="row small"><label>Accept score <input id="thr" type="number" min="0.5" max="0.99" step="0.01" value="0.88"></label><span class="mono" id="detBackend"></span></div>
+      <div data-mode="auto"><div class="row"><button id="btnAuto" class="btn primary" disabled>Auto detect</button><label class="small">Accept score <input id="thr" type="number" min="0.5" max="0.99" step="0.01" value="0.88" style="width:80px"></label><span class="small" id="detBackend"></span></div></div>
+      <div data-mode="manual"><p class="small">Click Draw tile quad, then the 4 corners of one grass-top face clockwise from top-left. Enter its grid x, height y and z, then Add face; rotation is classified from the pixels. Grow tries to find neighbours from it. Detected rows stay editable in the table.</p>
+      <div class="group"><div class="line"><span>x y z</span><input id="mx" type="number" step="1" value="0" aria-label="x"><input id="mz" type="number" step="1" value="0" aria-label="z"></div><div class="opt"><span>Height y</span><input id="my" type="number" step="1" value="0"></div></div>
+      <div class="row"><button id="btnAddFace" class="btn primary" disabled>Add face</button><button id="btnGrow" class="btn" disabled>Grow from quad</button></div></div>
       <div class="bar" id="detBar" hidden><i></i></div>
       <pre class="log" id="detLog" aria-live="polite"></pre>
     </section>
@@ -57,23 +57,23 @@
 
     <section class="card">
       <h2><b>3</b> Search</h2>
-      <div class="north" role="group" aria-label="North directions">
-        <span>north</span>
-        <label><input type="checkbox" class="n" value="0" checked>0</label><label><input type="checkbox" class="n" value="1" checked>1</label><label><input type="checkbox" class="n" value="2" checked>2</label><label><input type="checkbox" class="n" value="3" checked>3</label>
+      <div class="group">
+        <div class="line"><span>x</span><input id="xmin" type="number" value="-2000" aria-label="x min"><input id="xmax" type="number" value="2000" aria-label="x max"></div>
+        <div class="line"><span>y</span><input id="ymin" type="number" value="-64" aria-label="y min"><input id="ymax" type="number" value="320" aria-label="y max"></div>
+        <div class="line"><span>z</span><input id="zmin" type="number" value="-2000" aria-label="z min"><input id="zmax" type="number" value="2000" aria-label="z max"></div>
+        <div class="opt"><span>North</span><div class="north" role="group" aria-label="North directions"><label><input type="checkbox" id="nAny">Any</label><label><input type="checkbox" class="n" value="0" checked>0</label><label><input type="checkbox" class="n" value="1" checked>1</label><label><input type="checkbox" class="n" value="2" checked>2</label><label><input type="checkbox" class="n" value="3" checked>3</label></div></div>
+        <div class="opt"><span>Backend</span><select id="backend"><option value="auto">Auto</option><option value="gpu">WebGPU</option><option value="cpu">WASM (CPU)</option></select></div>
+        <div class="opt"><span>Max results</span><input id="maxres" type="number" min="1" max="100000" step="1" value="1000"></div>
+        <div class="opt"><span>Stop at first match</span><input id="stopFirst" type="checkbox"></div>
       </div>
-      <div class="bounds">
-        <label>x <input id="xmin" type="number" value="-2000"> <input id="xmax" type="number" value="2000"></label>
-        <label>y <input id="ymin" type="number" value="-64"> <input id="ymax" type="number" value="320"></label>
-        <label>z <input id="zmin" type="number" value="-2000"> <input id="zmax" type="number" value="2000"></label>
-      </div>
-      <div class="row presets small">presets <button class="chip" data-r="1000">±1k</button><button class="chip" data-r="10000">±10k</button><button class="chip" data-r="100000">±100k</button></div>
+      <div class="row presets small">Range <button class="chip" data-r="1000">±1k</button><button class="chip" data-r="10000">±10k</button><button class="chip" data-r="100000">±100k</button></div>
       <div class="row">
-        <label class="small">backend <select id="backend"><option value="auto">auto (GPU if present)</option><option value="gpu">WebGPU only</option><option value="cpu">CPU WASM</option></select></label>
         <button id="btnRun" class="btn primary" disabled>Run</button>
-        <button id="btnCancel" class="btn" disabled>Cancel</button>
+        <button id="btnPause" class="btn" disabled>Pause</button>
+        <button id="btnCancel" class="btn danger" disabled>Cancel</button>
       </div>
       <div class="bar" id="runBar" hidden><i></i></div>
-      <div class="stats mono" id="runStats">idle</div>
+      <div class="stats"><div><b id="sPct">0%</b>progress</div><div><b id="sPos">0 / 0</b>positions</div><div><b id="sRate">-</b>rate</div><div><b id="sEta">-</b>ETA</div><div><b id="sEl">0:00</b>elapsed (active)</div><div><b id="sMatch">0</b>matches</div><div class="wide" id="runStats">Idle</div></div>
       <ol class="matches mono" id="matches"></ol>
     </section>
 
