@@ -8,7 +8,7 @@ RTX4070Super CUDA. Inclusive x/z -5000..5000, y60..128.6901380069 origins per no
 
 M1 native Metal. Autotune correctness, invalidation and cache corruption tests actually passed. Throughput run awaits explicit release of the GPU by the browser benchmark owner, so no new native speed is claimed here. Historical~3B/s is not a measurement of this version.
 
-M2. SSH initially identified an AppleM2, but connectivity then failed after the owned Chrome launch. No completed benchmark is claimed. A saved PID is not proof of a running or stopped process.
+M2 WebGPU, actual AppleM2 Chrome. Inclusive x/z -5000..5000, y -64..319, all four norths.153630721536 origins in62.458 seconds,2.460B/s, sole3538 90 -454 north0. Warm cached±1000 search2.048B/s. GPU65536 signed32 hash cases and all nine variants with49161 exact dense matches passed. See M2-WebGPU.json. Owned Chrome was shut down and its debugging port verified free after the run.
 
 A100 and RTXPRO6000. No allocation or benchmark occurred. Colab preparation was source-pinned and validated offline, but the active Lumine controller requires zero provider assignments before continuing. A concurrent benchmark could block it, so these runs require a genuine nonoverlap window. Availability/quota not established. RunPod was not used. See COLAB-STATUS.md.
 

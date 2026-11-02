@@ -1,0 +1,227 @@
+{
+  "title": "PASS",
+  "data": {
+    "adapter": {
+      "vendor": "apple",
+      "architecture": "metal-3",
+      "device": "",
+      "description": ""
+    },
+    "sha256": "5fbfa247a7f9b67a93512cf822a8158219d0b7e75266f70b96bd8e1189bde95f",
+    "coldFull": {
+      "matches": [
+        {
+          "x": 3538,
+          "y": 90,
+          "z": -454,
+          "north": 0
+        }
+      ],
+      "done": 153630721536,
+      "total": 153630721536,
+      "seconds": 62.458300000011924,
+      "rate": 2459732678.218438,
+      "cancelled": false
+    },
+    "coldTuning": {
+      "wg": 256,
+      "items": 1,
+      "ms": 3.199999988079071,
+      "trials": [
+        {
+          "wg": 256,
+          "items": 1,
+          "ms": 3.199999988079071
+        },
+        {
+          "wg": 128,
+          "items": 4,
+          "ms": 4.200000047683716
+        },
+        {
+          "wg": 64,
+          "items": 1,
+          "ms": 4.399999976158142
+        },
+        {
+          "wg": 64,
+          "items": 2,
+          "ms": 4.5
+        },
+        {
+          "wg": 64,
+          "items": 4,
+          "ms": 5.300000011920929
+        },
+        {
+          "wg": 128,
+          "items": 2,
+          "ms": 5.600000023841858
+        },
+        {
+          "wg": 256,
+          "items": 4,
+          "ms": 5.699999988079071
+        },
+        {
+          "wg": 128,
+          "items": 1,
+          "ms": 5.899999976158142
+        },
+        {
+          "wg": 256,
+          "items": 2,
+          "ms": 6.100000023841858
+        }
+      ],
+      "cached": false
+    },
+    "warmSpeed": {
+      "matches": [],
+      "done": 1537536384,
+      "total": 1537536384,
+      "seconds": 0.7506999999880791,
+      "rate": 2048136917.5761497,
+      "cancelled": false
+    },
+    "warmTuning": {
+      "wg": 256,
+      "items": 1,
+      "ms": 3.199999988079071,
+      "cached": true
+    },
+    "variants": [
+      {
+        "wg": 64,
+        "items": 1,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 64,
+          "items": 1,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 64,
+        "items": 2,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 64,
+          "items": 2,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 64,
+        "items": 4,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 64,
+          "items": 4,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 128,
+        "items": 1,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 128,
+          "items": 1,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 128,
+        "items": 2,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 128,
+          "items": 2,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 128,
+        "items": 4,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 128,
+          "items": 4,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 256,
+        "items": 1,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 256,
+          "items": 1,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 256,
+        "items": 2,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 256,
+          "items": 2,
+          "ms": 0,
+          "cached": true
+        }
+      },
+      {
+        "wg": 256,
+        "items": 4,
+        "hill": "PASS",
+        "overflow": "PASS",
+        "matches": 49161,
+        "positions": 196608,
+        "tuning": {
+          "wg": 256,
+          "items": 4,
+          "ms": 0,
+          "cached": true
+        }
+      }
+    ]
+  },
+  "platform": "Apple M2",
+  "hash": {
+    "pass": 65536,
+    "oracle": "JS BigInt"
+  }
+}
