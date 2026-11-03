@@ -9,21 +9,29 @@ using namespace metal;
 typedef uint uint32_t;typedef int int32_t;typedef ulong uint64_t;typedef long int64_t;typedef uchar uint8_t;
 struct Block {int x,y,z,r,side;};
 struct Params {ulong base,ny,nz;uint count,nb;int xmin,ymin,zmin;uint items,threads,fast,yoff,zoff;int xbase;};
-uint2 mulc(uint2 a,uint b){return uint2(a.x*b,mulhi(a.x,b)+a.y*b);}
-uint2 add64(uint2 a,uint2 b){uint low=a.x+b.x;return uint2(low,a.y+b.y+uint(low<a.x));}
-uint rotation(int x,int y,int z){
+ulong rotation_xz(int x,int z){
  int xp=as_type<int>(uint(x)*3129871u);
- uint2 zp=mulc(uint2(uint(z),z<0?0xffffffffu:0u),116129781u);
- uint2 l=uint2(uint(xp)^zp.x^uint(y),(xp<0?0xffffffffu:0u)^zp.y^(y<0?0xffffffffu:0u));
- uint2 sq=uint2(l.x*l.x,mulhi(l.x,l.x)+2u*l.x*l.y);
- uint2 poly=add64(mulc(sq,42317861u),mulc(l,11u));
- uint2 seed=uint2(((poly.x>>16)|(poly.y<<16))^0xdeece66du,(poly.y>>16)^5u);
- uint low=seed.x*0xdeece66du;
- uint high=mulhi(seed.x,0xdeece66du)+seed.y*0xdeece66du+seed.x*5u+uint(low>0xfffffff4u);
- return (high>>14)&3u;
+ return ulong(int64_t(xp))^(ulong(int64_t(z))*116129781ULL);
 }
-bool matched(device const Block*blocks,uint nb,int x,int y,int z){
- for(uint i=0;i<nb;i++){
+uint rotation_y(ulong xz,int y){
+ ulong l=xz^ulong(int64_t(y));
+ l=l*l*42317861ULL+l*11ULL;
+ ulong seed=(((l>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ return uint(seed>>46);
+}
+uint2 rotation_y2(ulong xz,int y0,int y1){
+ ulong l0=xz^ulong(int64_t(y0)),l1=xz^ulong(int64_t(y1));
+ l0=l0*l0*42317861ULL+l0*11ULL;
+ l1=l1*l1*42317861ULL+l1*11ULL;
+ ulong s0=(((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ ulong s1=(((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ return uint2(uint(s0>>46),uint(s1>>46));
+}
+uint rotation(int x,int y,int z){
+ return rotation_y(rotation_xz(x,z),y);
+}
+bool matched(device const Block*blocks,uint nb,int x,int y,int z,uint start=0){
+ for(uint i=start;i<nb;i++){
   Block b=blocks[i];uint r=rotation(x+b.x,y+b.y,z+b.z);
   if((r&(b.side?1u:3u))!=uint(b.r))return false;
  }
@@ -40,9 +48,123 @@ kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [
    int z=int(int64_t(p.zmin)+zz),x=int(int64_t(p.xbase)+zid/nz);
    uint begin=task==0?p.yoff:0u;
    uint end=min(ny,p.count+p.yoff-task*ny);
-   for(uint yy=begin;yy<end;yy++){
+   Block b0=blocks[0];
+   uint mask0=b0.side?1u:3u;
+   uint target0=uint(b0.r);
+   ulong xz0=rotation_xz(x+b0.x,z+b0.z);
+   Block b1;uint mask1=0,target1=0;ulong xz1=0;
+   if(p.nb>1){
+    b1=blocks[1];
+    mask1=b1.side?1u:3u;
+    target1=uint(b1.r);
+    xz1=rotation_xz(x+b1.x,z+b1.z);
+   }
+   Block b2;uint mask2=0,target2=0;ulong xz2=0;
+   if(p.nb>2){
+    b2=blocks[2];
+    mask2=b2.side?1u:3u;
+    target2=uint(b2.r);
+    xz2=rotation_xz(x+b2.x,z+b2.z);
+   }
+   Block b3;uint mask3=0,target3=0;ulong xz3=0;
+   if(p.nb>3){
+    b3=blocks[3];
+    mask3=b3.side?1u:3u;
+    target3=uint(b3.r);
+    xz3=rotation_xz(x+b3.x,z+b3.z);
+   }
+   uint yy=begin;
+   for(;yy+1u<end;yy+=2u){
+    int yA=int(int64_t(p.ymin)+yy);
+    int yB=yA+1;
+    uint2 r0=rotation_y2(xz0,yA+b0.y,yB+b0.y);
+    bool passA=(r0.x&mask0)==target0;
+    bool passB=(r0.y&mask0)==target0;
+    if(!passA&&!passB)continue;
+    if(p.nb>1){
+     uint2 r1=rotation_y2(xz1,yA+b1.y,yB+b1.y);
+     passA=passA&((r1.x&mask1)==target1);
+     passB=passB&((r1.y&mask1)==target1);
+     if(!passA&&!passB)continue;
+    }
+    if(p.nb>2){
+     uint2 r2=rotation_y2(xz2,yA+b2.y,yB+b2.y);
+     passA=passA&((r2.x&mask2)==target2);
+     passB=passB&((r2.y&mask2)==target2);
+     if(!passA&&!passB)continue;
+    }
+    if(p.nb>3){
+     uint2 r3=rotation_y2(xz3,yA+b3.y,yB+b3.y);
+     passA=passA&((r3.x&mask3)==target3);
+     passB=passB&((r3.y&mask3)==target3);
+     if(!passA&&!passB)continue;
+    }
+    if(passA){
+     bool ok=true;
+     if(p.nb>4){
+      if(p.nb<=8){
+       #pragma unroll
+       for(uint i=4;i<8;i++){
+        if(i>=p.nb)break;
+        Block b=blocks[i];
+        uint r=rotation(x+b.x,yA+b.y,z+b.z);
+        if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
+       }
+      }else{
+       ok=matched(blocks,p.nb,x,yA,z,4);
+      }
+     }
+     if(ok)emit(results,task*ny+yy-p.yoff);
+    }
+    if(passB){
+     bool ok=true;
+     if(p.nb>4){
+      if(p.nb<=8){
+       #pragma unroll
+       for(uint i=4;i<8;i++){
+        if(i>=p.nb)break;
+        Block b=blocks[i];
+        uint r=rotation(x+b.x,yB+b.y,z+b.z);
+        if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
+       }
+      }else{
+       ok=matched(blocks,p.nb,x,yB,z,4);
+      }
+     }
+     if(ok)emit(results,task*ny+(yy+1u)-p.yoff);
+    }
+   }
+   for(;yy<end;yy++){
     int y=int(int64_t(p.ymin)+yy);
-    if(matched(blocks,p.nb,x,y,z))emit(results,task*ny+yy-p.yoff);
+    uint r0=rotation_y(xz0,y+b0.y);
+    if((r0&mask0)!=target0)continue;
+    if(p.nb>1){
+     uint r1=rotation_y(xz1,y+b1.y);
+     if((r1&mask1)!=target1)continue;
+    }
+    if(p.nb>2){
+     uint r2=rotation_y(xz2,y+b2.y);
+     if((r2&mask2)!=target2)continue;
+    }
+    if(p.nb>3){
+     uint r3=rotation_y(xz3,y+b3.y);
+     if((r3&mask3)!=target3)continue;
+    }
+    bool ok=true;
+    if(p.nb>4){
+     if(p.nb<=8){
+      #pragma unroll
+      for(uint i=4;i<8;i++){
+       if(i>=p.nb)break;
+       Block b=blocks[i];
+       uint r=rotation(x+b.x,y+b.y,z+b.z);
+       if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
+      }
+     }else{
+      ok=matched(blocks,p.nb,x,y,z,4);
+     }
+    }
+    if(ok)emit(results,task*ny+yy-p.yoff);
    }
   }else{
    uint index=task;if(index>=p.count)break;
@@ -59,11 +181,8 @@ struct Tune {uint32_t width=128,items=1;};
 static uint64_t hashBytes(uint64_t h,const void*p,size_t n){
  const auto*b=static_cast<const unsigned char*>(p);for(size_t i=0;i<n;i++){h^=b[i];h*=1099511628211ULL;}return h;
 }
-// Timings include only the GPU interval where available. Correctness comparisons and
-// command construction are outside that interval. Wall time is the older-OS fallback.
-static double dispatch(id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
+static id<MTLCommandBuffer> launch(id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
  id<MTLBuffer>bb,id<MTLBuffer>bf,Params p,Tune t){
- @autoreleasepool {
  p.items=t.items;p.threads=(p.count+t.items-1)/t.items;
  p.fast=p.ny<=4096&&p.nz<=UINT32_MAX-4194304u&&!std::getenv("GRASS_METAL_FORCE_WIDE");
  uint64_t origin=p.base;p.yoff=uint32_t(origin%p.ny);origin/=p.ny;p.zoff=uint32_t(origin%p.nz);origin/=p.nz;
@@ -75,7 +194,17 @@ static double dispatch(id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
  if(!cmd||!enc)throw std::runtime_error("Metal encoder allocation failed");
  [enc setComputePipelineState:pipe];[enc setBuffer:bb offset:0 atIndex:0];[enc setBuffer:bf offset:0 atIndex:1];[enc setBytes:&p length:sizeof(p) atIndex:2];
  [enc dispatchThreads:MTLSizeMake(p.threads,1,1) threadsPerThreadgroup:MTLSizeMake(t.width,1,1)];
- [enc endEncoding];auto start=std::chrono::steady_clock::now();[cmd commit];[cmd waitUntilCompleted];
+ [enc endEncoding];[cmd commit];
+ return cmd;
+}
+// Timings include only the GPU interval where available. Correctness comparisons and
+// command construction are outside that interval. Wall time is the older-OS fallback.
+static double dispatch(id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
+ id<MTLBuffer>bb,id<MTLBuffer>bf,Params p,Tune t){
+ @autoreleasepool {
+ auto start=std::chrono::steady_clock::now();
+ id<MTLCommandBuffer>cmd=launch(queue,pipe,bb,bf,p,t);
+ [cmd waitUntilCompleted];
  if(cmd.status!=MTLCommandBufferStatusCompleted)throw std::runtime_error(cmd.error?[[cmd.error localizedDescription] UTF8String]:"Metal dispatch failed");
  double gpu=cmd.GPUEndTime-cmd.GPUStartTime;
  return gpu>0?gpu:std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
@@ -177,26 +306,50 @@ int main(int argc,char**argv){@autoreleasepool{try{
  if(!pipe)throw std::runtime_error([[error localizedDescription] UTF8String]);
  id<MTLCommandQueue>queue=[device newCommandQueue];
  const uint32_t batch=4194304;
- id<MTLBuffer>bf=[device newBufferWithLength:(size_t(batch)+1)*4 options:MTLResourceStorageModeShared];
- if(!queue||!bf)throw std::runtime_error("Metal allocation failed");
+ id<MTLBuffer>bf[2]={
+  [device newBufferWithLength:(size_t(batch)+1)*4 options:MTLResourceStorageModeShared],
+  [device newBufferWithLength:(size_t(batch)+1)*4 options:MTLResourceStorageModeShared]
+ };
+ if(!queue||!bf[0]||!bf[1])throw std::runtime_error("Metal allocation failed");
  double searchSeconds=0;uint64_t done=0,matches=0;auto start=std::chrono::steady_clock::now();auto last=start;
  std::signal(SIGINT,stop_search);std::signal(SIGTERM,stop_search);
  for(int north:o.north){
   auto blocks=orient(original,north,o);
   std::stable_sort(blocks.begin(),blocks.end(),[](const Block&a,const Block&b){return a.side<b.side;});
   id<MTLBuffer>bb=[device newBufferWithBytes:blocks.data() length:blocks.size()*sizeof(Block) options:MTLResourceStorageModeShared];if(!bb)throw std::runtime_error("Metal block allocation failed");
-  Tune tune=autotune(device,queue,pipe,bb,bf,blocks,o,mode,path);
+  Tune tune=autotune(device,queue,pipe,bb,bf[0],blocks,o,mode,path);
   auto searchStart=std::chrono::steady_clock::now();
-  for(uint64_t base=0;base<o.total&&!stopped;){
-   uint32_t count=uint32_t(std::min<uint64_t>(batch,o.total-base));
-   Params p{base,o.dim[1],o.dim[2],count,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0};
-   dispatch(queue,pipe,bb,bf,p,tune);
-   auto ids=resultIds(bf,count);
-   for(uint32_t i:ids){int32_t x,y,z;decode(base+i,o,x,y,z);std::cout<<x<<" "<<y<<" "<<z<<" "<<north<<"\n";matches++;}
+  uint64_t base=0;uint32_t bufIdx=0;
+  id<MTLCommandBuffer>inflightCmd=nil;
+  uint32_t inflightBuf=0;uint64_t inflightBase=0;uint32_t inflightCount=0;
+  if(base<o.total&&!stopped){
+   inflightCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
+   Params p{base,o.dim[1],o.dim[2],inflightCount,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0};
+   inflightCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
+   inflightBuf=bufIdx;inflightBase=base;
+   base+=inflightCount;bufIdx^=1;
+  }
+  while(inflightCmd!=nil){
+   id<MTLCommandBuffer>nextCmd=nil;
+   uint32_t nextBuf=0;uint64_t nextBase=0;uint32_t nextCount=0;
+   if(base<o.total&&!stopped){
+    nextCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
+    Params p{base,o.dim[1],o.dim[2],nextCount,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0};
+    nextCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
+    nextBuf=bufIdx;nextBase=base;
+    base+=nextCount;bufIdx^=1;
+   }
+   [inflightCmd waitUntilCompleted];
+   if(inflightCmd.status!=MTLCommandBufferStatusCompleted)
+    throw std::runtime_error(inflightCmd.error?[[inflightCmd.error localizedDescription] UTF8String]:"Metal dispatch failed");
+   auto ids=resultIds(bf[inflightBuf],inflightCount);
+   for(uint32_t i:ids){int32_t x,y,z;decode(inflightBase+i,o,x,y,z);std::cout<<x<<" "<<y<<" "<<z<<" "<<north<<"\n";matches++;}
    if(!std::cout)throw std::runtime_error("Output write failed");
-   base+=count;done+=count;
+   done+=inflightCount;
    auto now=std::chrono::steady_clock::now();
    if(std::chrono::duration<double>(now-last).count()>=1){double sec=std::chrono::duration<double>(now-start).count();std::cerr<<"progress "<<done<<"/"<<o.total*o.north.size()<<" rate "<<double(done)/sec<<" candidates/s matches "<<matches<<"\n";last=now;}
+   if(stopped){if(nextCmd)[nextCmd waitUntilCompleted];break;}
+   inflightCmd=nextCmd;inflightBuf=nextBuf;inflightBase=nextBase;inflightCount=nextCount;
   }
   searchSeconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-searchStart).count();
   if(stopped)break;

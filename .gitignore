@@ -9,3 +9,5 @@ web/artifacts/
 
 web/tests/*.bundle
 web/native/
+.DS_Store
+metal/grass_solver
