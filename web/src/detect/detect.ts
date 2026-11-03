@@ -93,6 +93,61 @@ function gridQuad(H, x, z, y = 0) { return [[x, z], [x + 1, z], [x + 1, z + 1], 
 export function camQuad(P, x, y, z) { return [[0, 0], [1, 0], [1, 1], [0, 1]].map(([a, b]) => { const X = x + a, Z = z + b, w = P[8] * X + P[9] * y + P[10] * Z + P[11]; return [(P[0] * X + P[1] * y + P[2] * Z + P[3]) / w, (P[4] * X + P[5] * y + P[6] * Z + P[7]) / w]; }); }
 /* camera-ray sanity: all four corners must be in front of the camera */
 function camQuadOK(P, x, y, z) { for (const [a, b] of [[0, 0], [1, 0], [1, 1], [0, 1]]) if (P[8] * (x + a) + P[9] * y + P[10] * (z + b) + P[11] <= 0) return false; return true; }
+function projectCamQuad(P, x, y, z, w, h) {
+  const w0 = P[8] * x + P[9] * y + P[10] * z + P[11];
+  if (w0 <= 0) return null;
+  const u0 = (P[0] * x + P[1] * y + P[2] * z + P[3]) / w0;
+  if (!(u0 >= 0 && u0 < w - 1)) return null;
+  const v0 = (P[4] * x + P[5] * y + P[6] * z + P[7]) / w0;
+  if (!(v0 >= 0 && v0 < h - 1)) return null;
+
+  const x1 = x + 1;
+  const w1 = P[8] * x1 + P[9] * y + P[10] * z + P[11];
+  if (w1 <= 0) return null;
+  const u1 = (P[0] * x1 + P[1] * y + P[2] * z + P[3]) / w1;
+  if (!(u1 >= 0 && u1 < w - 1)) return null;
+  const v1 = (P[4] * x1 + P[5] * y + P[6] * z + P[7]) / w1;
+  if (!(v1 >= 0 && v1 < h - 1)) return null;
+
+  const z1 = z + 1;
+  const w2 = P[8] * x1 + P[9] * y + P[10] * z1 + P[11];
+  if (w2 <= 0) return null;
+  const u2 = (P[0] * x1 + P[1] * y + P[2] * z1 + P[3]) / w2;
+  if (!(u2 >= 0 && u2 < w - 1)) return null;
+  const v2 = (P[4] * x1 + P[5] * y + P[6] * z1 + P[7]) / w2;
+  if (!(v2 >= 0 && v2 < h - 1)) return null;
+
+  const w3 = P[8] * x + P[9] * y + P[10] * z1 + P[11];
+  if (w3 <= 0) return null;
+  const u3 = (P[0] * x + P[1] * y + P[2] * z1 + P[3]) / w3;
+  if (!(u3 >= 0 && u3 < w - 1)) return null;
+  const v3 = (P[4] * x + P[5] * y + P[6] * z1 + P[7]) / w3;
+  if (!(v3 >= 0 && v3 < h - 1)) return null;
+
+  const d01x = u1 - u0, d01y = v1 - v0;
+  const d12x = u2 - u1, d12y = v2 - v1;
+  const cp0 = d01x * d12y - d01y * d12x;
+  if (!cp0) return null;
+  const s = Math.sign(cp0);
+
+  const d23x = u3 - u2, d23y = v3 - v2;
+  const cp1 = d12x * d23y - d12y * d23x;
+  if (!cp1 || Math.sign(cp1) !== s) return null;
+
+  const d30x = u0 - u3, d30y = v0 - v3;
+  const cp2 = d23x * d30y - d23y * d30x;
+  if (!cp2 || Math.sign(cp2) !== s) return null;
+
+  const cp3 = d30x * d01y - d30y * d01x;
+  if (!cp3 || Math.sign(cp3) !== s) return null;
+
+  if (d01x * d01x + d01y * d01y < 64 ||
+      d12x * d12x + d12y * d12y < 64 ||
+      d23x * d23x + d23y * d23y < 64 ||
+      d30x * d30x + d30y * d30y < 64) return null;
+
+  return [[u0, v0], [u1, v1], [u2, v2], [u3, v3]];
+}
 
 /* ---------- batch classification (JS reference; WASM kernel plugs in via ctx.classifyBatch) ---------- */
 export type Verdict = { rotation: number; score: number; margin: number; votes: number } | null;
@@ -107,7 +162,14 @@ export function jsClassifyBatch(ctx: any, quads: Float32Array, n: number): Float
 }
 function batchClassify(ctx: any, quads: number[][][]): Verdict[] {
   const n = quads.length, flat = new Float32Array(n * 8);
-  quads.forEach((q, i) => q.forEach((p, k) => { flat[i*8+k*2] = p[0]; flat[i*8+k*2+1] = p[1]; }));
+  let idx = 0;
+  for (let i = 0; i < n; i++) {
+    const q = quads[i];
+    for (let k = 0; k < 4; k++) {
+      flat[idx++] = q[k][0];
+      flat[idx++] = q[k][1];
+    }
+  }
   const CH = 4096, res: Verdict[] = new Array(n);
   for (let s = 0; s < n; s += CH) {
     const m = Math.min(CH, n - s), sub = flat.subarray(s * 8, (s + m) * 8);
@@ -206,7 +268,7 @@ function makeRefiner(cv, ctx) {
 }
 function verify(ctx, quad, refine, thr, r0?) {
   let r = r0 === undefined ? classify(ctx, quad) : r0; if (!r) return null;
-  if (refine && r.score > thr.coarse && r.margin > 0.25) {
+  if (refine && r.score >= thr.relaxed && r.margin >= thr.acceptMargin && r.votes >= 3) {
     const nq = refine(quad, r.rotation);
     if (nq && isConvex(nq) && inImage(nq, ctx.w, ctx.h) && Math.max(...nq.map((p, i) => Math.hypot(p[0] - quad[i][0], p[1] - quad[i][1]))) < 3.5) {
       const r2 = classify(ctx, nq); if (r2 && r2.score > r.score) { quad = nq; r = r2; }
@@ -285,8 +347,8 @@ export function voxelStage(ctx, seeds, plane, refine, progress?) {
   for (let round = 0; round < 4; round++) {
     const thr = ctx.opts, accept = [], cand = [], R = 30, YR = 12;
     for (let y = -YR; y <= YR; y++) for (let z = -R; z <= R; z++) for (let x = -R; x <= R; x++) {
-      if (!camQuadOK(P, x, y, z)) continue;
-      const q = camQuad(P, x, y, z); if (!inImage(q, ctx.w, ctx.h) || !isConvex(q) || minSide(q) < 8) continue;
+      const q = projectCamQuad(P, x, y, z, ctx.w, ctx.h);
+      if (!q) continue;
       cand.push({ q, x, y, z });
     }
     const vs = batchClassify(ctx, cand.map(c => c.q));

@@ -33,9 +33,9 @@ __device__ __forceinline__ int rotation_y(uint64_t xz, int32_t y) {
   return int(((seed * uint64_t(0x5DEECE66D) + 11) >> 46) & 3);
 }
 
-__device__ __forceinline__ void rotation_y2(uint64_t xz, int32_t y0, int32_t y1, int& r0, int& r1) {
-  uint64_t l0 = xz ^ uint64_t(int64_t(y0));
-  uint64_t l1 = xz ^ uint64_t(int64_t(y1));
+__device__ __forceinline__ void rotation_y2(uint64_t xz, int32_t base_y, int& r0, int& r1) {
+  uint64_t l0 = xz ^ uint64_t(int64_t(base_y));
+  uint64_t l1 = xz ^ uint64_t(int64_t(base_y + 1));
 
   uint64_t sq0 = l0 * l0;
   uint64_t sq1 = l1 * l1;
@@ -53,12 +53,12 @@ __device__ __forceinline__ void rotation_y2(uint64_t xz, int32_t y0, int32_t y1,
   r1 = int((step1 >> 46) & 3);
 }
 
-__device__ __forceinline__ void rotation_y4(uint64_t xz, int32_t y0, int32_t y1, int32_t y2, int32_t y3,
+__device__ __forceinline__ void rotation_y4(uint64_t xz, int32_t base_y,
                                             int& r0, int& r1, int& r2, int& r3) {
-  uint64_t l0 = xz ^ uint64_t(int64_t(y0));
-  uint64_t l1 = xz ^ uint64_t(int64_t(y1));
-  uint64_t l2 = xz ^ uint64_t(int64_t(y2));
-  uint64_t l3 = xz ^ uint64_t(int64_t(y3));
+  uint64_t l0 = xz ^ uint64_t(int64_t(base_y));
+  uint64_t l1 = xz ^ uint64_t(int64_t(base_y + 1));
+  uint64_t l2 = xz ^ uint64_t(int64_t(base_y + 2));
+  uint64_t l3 = xz ^ uint64_t(int64_t(base_y + 3));
 
   uint64_t sq0 = l0 * l0;
   uint64_t sq1 = l1 * l1;
@@ -144,6 +144,11 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
       xz3 = rotation_xz(x + b3.x, z + b3.z);
     }
 
+    const int mask0 = b0.side ? 1 : 3;
+    const int mask1 = b1.side ? 1 : 3;
+    const int mask2 = b2.side ? 1 : 3;
+    const int mask3 = b3.side ? 1 : 3;
+
     uint32_t begin = (task == 0) ? yoff : 0u;
     uint32_t rem = count + yoff - task * ny;
     uint32_t end = rem < ny ? rem : ny;
@@ -156,64 +161,40 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
       int32_t y3 = int32_t(int64_t(ymin) + (yy + 3));
 
       int r0_0, r0_1, r0_2, r0_3;
-      rotation_y4(xz0, y0 + b0.y, y1 + b0.y, y2 + b0.y, y3 + b0.y, r0_0, r0_1, r0_2, r0_3);
-      if (b0.side) {
-        r0_0 %= 2;
-        r0_1 %= 2;
-        r0_2 %= 2;
-        r0_3 %= 2;
-      }
-      bool m0 = (r0_0 == b0.r);
-      bool m1 = (r0_1 == b0.r);
-      bool m2 = (r0_2 == b0.r);
-      bool m3 = (r0_3 == b0.r);
+      rotation_y4(xz0, y0 + b0.y, r0_0, r0_1, r0_2, r0_3);
+      bool m0 = ((r0_0 & mask0) == b0.r);
+      bool m1 = ((r0_1 & mask0) == b0.r);
+      bool m2 = ((r0_2 & mask0) == b0.r);
+      bool m3 = ((r0_3 & mask0) == b0.r);
       if (!m0 && !m1 && !m2 && !m3) continue;
 
       if (nb > 1) {
         int r1_0, r1_1, r1_2, r1_3;
-        rotation_y4(xz1, y0 + b1.y, y1 + b1.y, y2 + b1.y, y3 + b1.y, r1_0, r1_1, r1_2, r1_3);
-        if (b1.side) {
-          r1_0 %= 2;
-          r1_1 %= 2;
-          r1_2 %= 2;
-          r1_3 %= 2;
-        }
-        m0 = m0 && (r1_0 == b1.r);
-        m1 = m1 && (r1_1 == b1.r);
-        m2 = m2 && (r1_2 == b1.r);
-        m3 = m3 && (r1_3 == b1.r);
+        rotation_y4(xz1, y0 + b1.y, r1_0, r1_1, r1_2, r1_3);
+        m0 = m0 && ((r1_0 & mask1) == b1.r);
+        m1 = m1 && ((r1_1 & mask1) == b1.r);
+        m2 = m2 && ((r1_2 & mask1) == b1.r);
+        m3 = m3 && ((r1_3 & mask1) == b1.r);
         if (!m0 && !m1 && !m2 && !m3) continue;
       }
 
       if (nb > 2) {
         int r2_0, r2_1, r2_2, r2_3;
-        rotation_y4(xz2, y0 + b2.y, y1 + b2.y, y2 + b2.y, y3 + b2.y, r2_0, r2_1, r2_2, r2_3);
-        if (b2.side) {
-          r2_0 %= 2;
-          r2_1 %= 2;
-          r2_2 %= 2;
-          r2_3 %= 2;
-        }
-        m0 = m0 && (r2_0 == b2.r);
-        m1 = m1 && (r2_1 == b2.r);
-        m2 = m2 && (r2_2 == b2.r);
-        m3 = m3 && (r2_3 == b2.r);
+        rotation_y4(xz2, y0 + b2.y, r2_0, r2_1, r2_2, r2_3);
+        m0 = m0 && ((r2_0 & mask2) == b2.r);
+        m1 = m1 && ((r2_1 & mask2) == b2.r);
+        m2 = m2 && ((r2_2 & mask2) == b2.r);
+        m3 = m3 && ((r2_3 & mask2) == b2.r);
         if (!m0 && !m1 && !m2 && !m3) continue;
       }
 
       if (nb > 3) {
         int r3_0, r3_1, r3_2, r3_3;
-        rotation_y4(xz3, y0 + b3.y, y1 + b3.y, y2 + b3.y, y3 + b3.y, r3_0, r3_1, r3_2, r3_3);
-        if (b3.side) {
-          r3_0 %= 2;
-          r3_1 %= 2;
-          r3_2 %= 2;
-          r3_3 %= 2;
-        }
-        m0 = m0 && (r3_0 == b3.r);
-        m1 = m1 && (r3_1 == b3.r);
-        m2 = m2 && (r3_2 == b3.r);
-        m3 = m3 && (r3_3 == b3.r);
+        rotation_y4(xz3, y0 + b3.y, r3_0, r3_1, r3_2, r3_3);
+        m0 = m0 && ((r3_0 & mask3) == b3.r);
+        m1 = m1 && ((r3_1 & mask3) == b3.r);
+        m2 = m2 && ((r3_2 & mask3) == b3.r);
+        m3 = m3 && ((r3_3 & mask3) == b3.r);
         if (!m0 && !m1 && !m2 && !m3) continue;
       }
 
@@ -267,48 +248,32 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
       int32_t y1 = int32_t(int64_t(ymin) + (yy + 1));
 
       int r0_0, r0_1;
-      rotation_y2(xz0, y0 + b0.y, y1 + b0.y, r0_0, r0_1);
-      if (b0.side) {
-        r0_0 %= 2;
-        r0_1 %= 2;
-      }
-      bool m0 = (r0_0 == b0.r);
-      bool m1 = (r0_1 == b0.r);
+      rotation_y2(xz0, y0 + b0.y, r0_0, r0_1);
+      bool m0 = ((r0_0 & mask0) == b0.r);
+      bool m1 = ((r0_1 & mask0) == b0.r);
       if (!m0 && !m1) continue;
 
       if (nb > 1) {
         int r1_0, r1_1;
-        rotation_y2(xz1, y0 + b1.y, y1 + b1.y, r1_0, r1_1);
-        if (b1.side) {
-          r1_0 %= 2;
-          r1_1 %= 2;
-        }
-        m0 = m0 && (r1_0 == b1.r);
-        m1 = m1 && (r1_1 == b1.r);
+        rotation_y2(xz1, y0 + b1.y, r1_0, r1_1);
+        m0 = m0 && ((r1_0 & mask1) == b1.r);
+        m1 = m1 && ((r1_1 & mask1) == b1.r);
         if (!m0 && !m1) continue;
       }
 
       if (nb > 2) {
         int r2_0, r2_1;
-        rotation_y2(xz2, y0 + b2.y, y1 + b2.y, r2_0, r2_1);
-        if (b2.side) {
-          r2_0 %= 2;
-          r2_1 %= 2;
-        }
-        m0 = m0 && (r2_0 == b2.r);
-        m1 = m1 && (r2_1 == b2.r);
+        rotation_y2(xz2, y0 + b2.y, r2_0, r2_1);
+        m0 = m0 && ((r2_0 & mask2) == b2.r);
+        m1 = m1 && ((r2_1 & mask2) == b2.r);
         if (!m0 && !m1) continue;
       }
 
       if (nb > 3) {
         int r3_0, r3_1;
-        rotation_y2(xz3, y0 + b3.y, y1 + b3.y, r3_0, r3_1);
-        if (b3.side) {
-          r3_0 %= 2;
-          r3_1 %= 2;
-        }
-        m0 = m0 && (r3_0 == b3.r);
-        m1 = m1 && (r3_1 == b3.r);
+        rotation_y2(xz3, y0 + b3.y, r3_0, r3_1);
+        m0 = m0 && ((r3_0 & mask3) == b3.r);
+        m1 = m1 && ((r3_1 & mask3) == b3.r);
         if (!m0 && !m1) continue;
       }
 
@@ -338,25 +303,21 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
     for (; yy < end; yy++) {
       int32_t y = int32_t(int64_t(ymin) + yy);
       int r0 = rotation_y(xz0, y + b0.y);
-      if (b0.side) r0 %= 2;
-      if (r0 != b0.r) continue;
+      if ((r0 & mask0) != b0.r) continue;
 
       if (nb > 1) {
         int r1 = rotation_y(xz1, y + b1.y);
-        if (b1.side) r1 %= 2;
-        if (r1 != b1.r) continue;
+        if ((r1 & mask1) != b1.r) continue;
       }
 
       if (nb > 2) {
         int r2 = rotation_y(xz2, y + b2.y);
-        if (b2.side) r2 %= 2;
-        if (r2 != b2.r) continue;
+        if ((r2 & mask2) != b2.r) continue;
       }
 
       if (nb > 3) {
         int r3 = rotation_y(xz3, y + b3.y);
-        if (b3.side) r3 %= 2;
-        if (r3 != b3.r) continue;
+        if ((r3 & mask3) != b3.r) continue;
       }
 
       uint8_t ok = 1;

@@ -40,11 +40,20 @@ export function siftSeeds(s: any, cv: any, ctx: any, log = (_: string) => {}) {
  log(`SIFT WASM: ${a.n} texture / ${b.n} image features`);
  let P:number[][]=[], Q:number[][]=[];
  for(let i=0;i<b.n;i++) {
+  const bi = i * 130 + 2;
   let best=Infinity,second=Infinity,jbest=0;
-  for(let j=0;j<a.n;j++) { let d=0; for(let k=2;k<130;k++){const v=b.a[i*130+k]-a.a[j*130+k];d+=v*v;}
-   if(d<best){second=best;best=d;jbest=j;}else if(d<second)second=d;
+  for(let j=0;j<a.n;j++) {
+   const aj = j * 130 + 2;
+   let d = 0;
+   for(let k=0;k<128;k++) {
+    const v = b.a[bi+k] - a.a[aj+k];
+    d += v * v;
+    if(d >= second) break;
+   }
+   if(d < best) { second = best; best = d; jbest = j; }
+   else if(d < second) second = d;
   }
-  if(best<.68*.68*second){P.push([a.a[jbest*130],a.a[jbest*130+1]]);Q.push([b.a[i*130],b.a[i*130+1]]);}
+  if(best < 0.68 * 0.68 * second) { P.push([a.a[jbest*130],a.a[jbest*130+1]]); Q.push([b.a[i*130],b.a[i*130+1]]); }
  }
  log(`SIFT: ${P.length} ratio-test matches`);
  const found:number[][][]=[];

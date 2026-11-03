@@ -5,36 +5,21 @@ static double refs[256][4];
 static float patch[256];
 void set_refs(const u8 *r){for(int i=0;i<256;i++)for(int k=0;k<4;k++)refs[i][k]=r[k*256+i];}
 static int fit(const float*q,double*H){
- double m[8][9]={0};
- for(int i=0;i<4;i++){
-  double x=(i==1||i==2)?16:0,y=i>=2?16:0,u=q[i*2],v=q[i*2+1];
-  double rows[2][9]={{x,y,1,0,0,0,-u*x,-u*y,u},{0,0,0,x,y,1,-v*x,-v*y,v}};
-  for(int k=0;k<2;k++)for(int a=0;a<8;a++){m[a][8]+=rows[k][a]*rows[k][8];for(int b=0;b<8;b++)m[a][b]+=rows[k][a]*rows[k][b];}
- }
- for(int j=0;j<8;j++){
-  int k=j;for(int i=j+1;i<8;i++)if(__builtin_fabs(m[i][j])>__builtin_fabs(m[k][j]))k=i;
-  for(int t=0;t<9;t++){double tmp=m[j][t];m[j][t]=m[k][t];m[k][t]=tmp;}
-  if(__builtin_fabs(m[j][j])<1e-12)return 0;
-  double d=m[j][j];for(int t=j;t<=8;t++)m[j][t]/=d;
-  for(int i=0;i<8;i++)if(i!=j){double f=m[i][j];if(f)for(int t=j;t<=8;t++)m[i][t]-=f*m[j][t];}
- }
- for(int i=0;i<8;i++)H[i]=m[i][8];H[8]=1;return 1;
-}
-static int correlate(int quadrant,double *sc){
- double sa=0,aa=0;int n=0;
- v128_t sb0=wasm_f64x2_splat(0),sb1=sb0,bb0=sb0,bb1=sb0,ab0=sb0,ab1=sb0;
- for(int j=1;j<15;j++)for(int i=1;i<15;i++){
-  if(quadrant>=0&&((i>=8?1:0)+(j>=8?2:0))!=quadrant)continue;
-  int idx=j*16+i;double a=patch[idx];sa+=a;aa+=a*a;n++;
-  v128_t av=wasm_f64x2_splat(a),b0=wasm_v128_load(refs[idx]),b1=wasm_v128_load(refs[idx]+2);
-  sb0=wasm_f64x2_add(sb0,b0);sb1=wasm_f64x2_add(sb1,b1);
-  bb0=wasm_f64x2_add(bb0,wasm_f64x2_mul(b0,b0));bb1=wasm_f64x2_add(bb1,wasm_f64x2_mul(b1,b1));
-  ab0=wasm_f64x2_add(ab0,wasm_f64x2_mul(av,b0));ab1=wasm_f64x2_add(ab1,wasm_f64x2_mul(av,b1));
- }
- double sb[4],bb[4],ab[4];wasm_v128_store(sb,sb0);wasm_v128_store(sb+2,sb1);wasm_v128_store(bb,bb0);wasm_v128_store(bb+2,bb1);wasm_v128_store(ab,ab0);wasm_v128_store(ab+2,ab1);
- int best=0;double va=aa-sa*sa/n;
- for(int k=0;k<4;k++){double vb=bb[k]-sb[k]*sb[k]/n;sc[k]=(va<1e-9||vb<1e-9)?0:(ab[k]-sa*sb[k]/n)/__builtin_sqrt(va*vb);if(sc[k]>sc[best])best=k;}
- return best;
+ double x0=q[0],y0=q[1],x1=q[2],y1=q[3],x2=q[4],y2=q[5],x3=q[6],y3=q[7];
+ double dx1=x1-x2,dx2=x3-x2,dx3=x0-x1+x2-x3;
+ double dy1=y1-y2,dy2=y3-y2,dy3=y0-y1+y2-y3;
+ double det=dx1*dy2-dx2*dy1;
+ if(__builtin_fabs(det)<1e-12)return 0;
+ double g=((dx3*dy2-dx2*dy3)/det)/16.0;
+ double h=((dx1*dy3-dx3*dy1)/det)/16.0;
+ double a=(x1-x0)/16.0+g*x1;
+ double b=(x3-x0)/16.0+h*x3;
+ double c=x0;
+ double d=(y1-y0)/16.0+g*y1;
+ double e=(y3-y0)/16.0+h*y3;
+ double f=y0;
+ H[0]=a;H[1]=b;H[2]=c;H[3]=d;H[4]=e;H[5]=f;H[6]=g;H[7]=h;H[8]=1.0;
+ return 1;
 }
 void classify_batch(const u8*g,int w,int h,const float*quads,int count,float*out){
  for(int t=0;t<count;t++){
@@ -47,9 +32,58 @@ void classify_batch(const u8*g,int w,int h,const float*quads,int count,float*out
    patch[j*16+i]=(float)(g[p]*(1-fx)*(1-fy)+g[p+1]*fx*(1-fy)+g[p+w]*(1-fx)*fy+g[p+w+1]*fx*fy);
   }
   if(!valid)continue;
-  double sc[4];int best=correlate(-1,sc),second=best==0?1:0;
+  double q_sa[4]={0},q_aa[4]={0};
+  v128_t q_sb0[4],q_sb1[4],q_bb0[4],q_bb1[4],q_ab0[4],q_ab1[4];
+  v128_t zero=wasm_f64x2_splat(0);
+  for(int q=0;q<4;q++){
+   q_sb0[q]=zero;q_sb1[q]=zero;
+   q_bb0[q]=zero;q_bb1[q]=zero;
+   q_ab0[q]=zero;q_ab1[q]=zero;
+  }
+  for(int j=1;j<15;j++)for(int i=1;i<15;i++){
+   int q=(i>=8?1:0)+(j>=8?2:0);
+   int idx=j*16+i;double a=patch[idx];
+   q_sa[q]+=a;q_aa[q]+=a*a;
+   v128_t av=wasm_f64x2_splat(a),b0=wasm_v128_load(refs[idx]),b1=wasm_v128_load(refs[idx]+2);
+   q_sb0[q]=wasm_f64x2_add(q_sb0[q],b0);q_sb1[q]=wasm_f64x2_add(q_sb1[q],b1);
+   q_bb0[q]=wasm_f64x2_add(q_bb0[q],wasm_f64x2_mul(b0,b0));q_bb1[q]=wasm_f64x2_add(q_bb1[q],wasm_f64x2_mul(b1,b1));
+   q_ab0[q]=wasm_f64x2_add(q_ab0[q],wasm_f64x2_mul(av,b0));q_ab1[q]=wasm_f64x2_add(q_ab1[q],wasm_f64x2_mul(av,b1));
+  }
+  double sa=q_sa[0]+q_sa[1]+q_sa[2]+q_sa[3];
+  double aa=q_aa[0]+q_aa[1]+q_aa[2]+q_aa[3];
+  v128_t sb0=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_sb0[0],q_sb0[1]),q_sb0[2]),q_sb0[3]);
+  v128_t sb1=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_sb1[0],q_sb1[1]),q_sb1[2]),q_sb1[3]);
+  v128_t bb0=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_bb0[0],q_bb0[1]),q_bb0[2]),q_bb0[3]);
+  v128_t bb1=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_bb1[0],q_bb1[1]),q_bb1[2]),q_bb1[3]);
+  v128_t ab0=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_ab0[0],q_ab0[1]),q_ab0[2]),q_ab0[3]);
+  v128_t ab1=wasm_f64x2_add(wasm_f64x2_add(wasm_f64x2_add(q_ab1[0],q_ab1[1]),q_ab1[2]),q_ab1[3]);
+  double sb[4],bb[4],ab[4];
+  wasm_v128_store(sb,sb0);wasm_v128_store(sb+2,sb1);
+  wasm_v128_store(bb,bb0);wasm_v128_store(bb+2,bb1);
+  wasm_v128_store(ab,ab0);wasm_v128_store(ab+2,ab1);
+  int best=0;double va=aa-sa*sa/196.0;double sc[4];
+  for(int k=0;k<4;k++){
+   double vb=bb[k]-sb[k]*sb[k]/196.0;
+   sc[k]=(va<1e-9||vb<1e-9)?0:(ab[k]-sa*sb[k]/196.0)/__builtin_sqrt(va*vb);
+   if(sc[k]>sc[best])best=k;
+  }
+  int second=best==0?1:0;
   for(int k=0;k<4;k++)if(k!=best&&sc[k]>sc[second])second=k;
-  int votes=0;for(int q=0;q<4;q++){double s[4];if(correlate(q,s)==best)votes++;}
+  int votes=0;
+  for(int q=0;q<4;q++){
+   double qsb[4],qbb[4],qab[4];
+   wasm_v128_store(qsb,q_sb0[q]);wasm_v128_store(qsb+2,q_sb1[q]);
+   wasm_v128_store(qbb,q_bb0[q]);wasm_v128_store(qbb+2,q_bb1[q]);
+   wasm_v128_store(qab,q_ab0[q]);wasm_v128_store(qab+2,q_ab1[q]);
+   double qva=q_aa[q]-q_sa[q]*q_sa[q]/49.0;
+   int q_best=0;double q_sc[4];
+   for(int k=0;k<4;k++){
+    double qvb=qbb[k]-qsb[k]*qsb[k]/49.0;
+    q_sc[k]=(qva<1e-9||qvb<1e-9)?0:(qab[k]-q_sa[q]*qsb[k]/49.0)/__builtin_sqrt(qva*qvb);
+    if(q_sc[k]>q_sc[q_best])q_best=k;
+   }
+   if(q_best==best)votes++;
+  }
   o[0]=1;o[1]=best;o[2]=(float)sc[best];o[3]=(float)(sc[best]-sc[second]);o[4]=votes;
  }
 }

@@ -77,6 +77,14 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
   mask2=select(3u,1u,b2.side!=0);
   target2=u32(b2.r);
  }
+ var b3:Block;
+ var mask3=0u;
+ var target3=0u;
+ if(p.blocks>3u){
+  b3=blocks[3];
+  mask3=select(3u,1u,b3.side!=0);
+  target3=u32(b3.r);
+ }
  for(var item=0u;item<ITEMS;item++){
   let index=base_index+item;
   if(index>=p.count){return;}
@@ -90,6 +98,10 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
   if(p.blocks>2u){
    xz2=rotation_xz(x+b2.x,z+b2.z);
   }
+  var xz3=vec2(0u,0u);
+  if(p.blocks>3u){
+   xz3=rotation_xz(x+b3.x,z+b3.z);
+  }
   for(var y=p.ymin;y<=p.ymax;y++){
    let r0=rotation_y(xz0,y+b0.y);
    if((r0&mask0)!=target0){continue;}
@@ -101,8 +113,12 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
     let r2=rotation_y(xz2,y+b2.y);
     if((r2&mask2)!=target2){continue;}
    }
+   if(p.blocks>3u){
+    let r3 = rotation_y(xz3, y + b3.y);
+    if ((r3 & mask3) != target3) { continue; }
+   }
    var matched=true;
-   for(var i=3u;i<p.blocks;i++){
+   for(var i=4u;i<p.blocks;i++){
     let b=blocks[i];let r=rotation(x+b.x,y+b.y,z+b.z);
     let mask=select(3u,1u,b.side!=0);
     if((r&mask)!=u32(b.r)){matched=false;break;}
