@@ -48,6 +48,7 @@ if (r.blocks.length > 0) {
   for (const b of r.blocks) {
     lines.push(`${b.x} ${b.y} ${b.z} ${b.rotation} 0`);
   }
-  fs.writeFileSync(`/Users/lucaszhang/grassblocks-cracker/metal/formation_att_${idx}.txt`, lines.join('\n') + '\n');
+  const metalDir = process.env.METAL_DIR || new URL('../../metal/', import.meta.url).pathname;
+  fs.writeFileSync(`${metalDir}formation_att_${idx}.txt`, lines.join('\n') + '\n');
   console.log(`Saved metal/formation_att_${idx}.txt with ${r.blocks.length} blocks.`);
 }

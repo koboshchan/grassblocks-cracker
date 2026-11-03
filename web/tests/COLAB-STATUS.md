@@ -2,9 +2,9 @@ Colab native CUDA benchmarks remain blocked by the current Lumine chain. Neither
 
 Benchmark authority is already granted for short runs after local kernel validation. No additional confirmation is requested. The owner may resume after Lumine completes and an actual nonoverlap window is established.
 
-A fresh authenticated read-only SDK inventory at Unix timestamp 1793590954 showed zero assignments. That is not sufficient permission to allocate concurrently. Lumine guard PID 6053 and cleanup/resume PID 27593 were live, and cleanup had reached 6600 of 12063 objects. The protected controller's probe_allocation.assignment_once requires zero active provider assignments before allocating. A separately owned benchmark runtime could therefore block its automatic continuation. No controller files, runtimes, or saved browser session were modified.
+Before any allocation, confirm no other runtime would be affected by the benchmark session.
 
-Durable preparation lives on host grass-auto at /home/kit/grass-colab-prep. benchmark.py is the workload harness; PLAN.txt documents the lifecycle requirements. final-payload contains the exact six-file source/test/formation allowlist, pinned by final-manifest.json. Its total size is 17686 bytes. No other files belong in the source payload.
+The preparation bundle contains a benchmark harness, a plan, and a final payload holding the exact six-file source/test/formation allowlist, pinned by final-manifest.json. Its total size is 17686 bytes. No other files belong in the source payload.
 
 The final grass_solver.cu SHA256 was checked against FINAL_KERNEL_READY. The complete pinned allowlist follows.
 
