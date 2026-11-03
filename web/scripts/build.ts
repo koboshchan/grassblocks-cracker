@@ -20,5 +20,3 @@ try{await access('artifacts/kernel.wgsl');await cp('artifacts/kernel.wgsl','dist
 await writeFile('dist/build-meta.json',JSON.stringify(result.metafile,null,2));
 console.log('Built single minified app.js with inline CPU worker');
 
-try{await access('../cuda');await cp('../cuda','dist/native/cuda',{recursive:true});}catch(e){if(e.code!=='ENOENT')throw e;}
-try{await access('../metal');await cp('../metal','dist/native/metal',{recursive:true});}catch(e){if(e.code!=='ENOENT')throw e;}
