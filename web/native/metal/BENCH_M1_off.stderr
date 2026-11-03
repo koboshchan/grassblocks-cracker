@@ -1,6 +1,0 @@
-autotune off width 128 items 1
-progress 1828716544/6901380069 rate 1.82749e+09 candidates/s matches 0
-progress 3644850176/6901380069 rate 1.81742e+09 candidates/s matches 0
-progress 5511315456/6901380069 rate 1.83297e+09 candidates/s matches 0
-search_loop seconds 3.74949 rate 1.84062e+09 candidates/s tuning_excluded 1
-complete total 6901380069 matches 1 seconds 3.74958 rate 1.84057e+09 candidates/s
