@@ -53,6 +53,39 @@ __device__ __forceinline__ void rotation_y2(uint64_t xz, int32_t y0, int32_t y1,
   r1 = int((step1 >> 46) & 3);
 }
 
+__device__ __forceinline__ void rotation_y4(uint64_t xz, int32_t y0, int32_t y1, int32_t y2, int32_t y3,
+                                            int& r0, int& r1, int& r2, int& r3) {
+  uint64_t l0 = xz ^ uint64_t(int64_t(y0));
+  uint64_t l1 = xz ^ uint64_t(int64_t(y1));
+  uint64_t l2 = xz ^ uint64_t(int64_t(y2));
+  uint64_t l3 = xz ^ uint64_t(int64_t(y3));
+
+  uint64_t sq0 = l0 * l0;
+  uint64_t sq1 = l1 * l1;
+  uint64_t sq2 = l2 * l2;
+  uint64_t sq3 = l3 * l3;
+
+  l0 = sq0 * uint64_t(42317861) + l0 * uint64_t(11);
+  l1 = sq1 * uint64_t(42317861) + l1 * uint64_t(11);
+  l2 = sq2 * uint64_t(42317861) + l2 * uint64_t(11);
+  l3 = sq3 * uint64_t(42317861) + l3 * uint64_t(11);
+
+  uint64_t seed0 = (l0 >> 16) ^ uint64_t(0x5DEECE66D);
+  uint64_t seed1 = (l1 >> 16) ^ uint64_t(0x5DEECE66D);
+  uint64_t seed2 = (l2 >> 16) ^ uint64_t(0x5DEECE66D);
+  uint64_t seed3 = (l3 >> 16) ^ uint64_t(0x5DEECE66D);
+
+  uint64_t step0 = seed0 * uint64_t(0x5DEECE66D) + 11;
+  uint64_t step1 = seed1 * uint64_t(0x5DEECE66D) + 11;
+  uint64_t step2 = seed2 * uint64_t(0x5DEECE66D) + 11;
+  uint64_t step3 = seed3 * uint64_t(0x5DEECE66D) + 11;
+
+  r0 = int((step0 >> 46) & 3);
+  r1 = int((step1 >> 46) & 3);
+  r2 = int((step2 >> 46) & 3);
+  r3 = int((step3 >> 46) & 3);
+}
+
 __device__ __forceinline__ int texture(int32_t bx, int32_t by, int32_t bz, int side) {
   int r = rotation_y(rotation_xz(bx, bz), by);
   if (side) r %= 2;
@@ -72,7 +105,7 @@ __device__ __forceinline__ Block load_block(const Block* __restrict__ blocks, ui
   return b;
 }
 
-__global__ void search_fast(const Block* __restrict__ blocks, uint32_t nb, uint32_t* results, uint32_t* result_count,
+__global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ blocks, uint32_t nb, uint32_t* results, uint32_t* result_count,
                             uint32_t count, uint32_t items,
                             int32_t ymin, int32_t zmin,
                             uint32_t ny, uint32_t nz,
@@ -116,6 +149,119 @@ __global__ void search_fast(const Block* __restrict__ blocks, uint32_t nb, uint3
     uint32_t end = rem < ny ? rem : ny;
 
     uint32_t yy = begin;
+    for (; yy + 3 < end; yy += 4) {
+      int32_t y0 = int32_t(int64_t(ymin) + yy);
+      int32_t y1 = int32_t(int64_t(ymin) + (yy + 1));
+      int32_t y2 = int32_t(int64_t(ymin) + (yy + 2));
+      int32_t y3 = int32_t(int64_t(ymin) + (yy + 3));
+
+      int r0_0, r0_1, r0_2, r0_3;
+      rotation_y4(xz0, y0 + b0.y, y1 + b0.y, y2 + b0.y, y3 + b0.y, r0_0, r0_1, r0_2, r0_3);
+      if (b0.side) {
+        r0_0 %= 2;
+        r0_1 %= 2;
+        r0_2 %= 2;
+        r0_3 %= 2;
+      }
+      bool m0 = (r0_0 == b0.r);
+      bool m1 = (r0_1 == b0.r);
+      bool m2 = (r0_2 == b0.r);
+      bool m3 = (r0_3 == b0.r);
+      if (!m0 && !m1 && !m2 && !m3) continue;
+
+      if (nb > 1) {
+        int r1_0, r1_1, r1_2, r1_3;
+        rotation_y4(xz1, y0 + b1.y, y1 + b1.y, y2 + b1.y, y3 + b1.y, r1_0, r1_1, r1_2, r1_3);
+        if (b1.side) {
+          r1_0 %= 2;
+          r1_1 %= 2;
+          r1_2 %= 2;
+          r1_3 %= 2;
+        }
+        m0 = m0 && (r1_0 == b1.r);
+        m1 = m1 && (r1_1 == b1.r);
+        m2 = m2 && (r1_2 == b1.r);
+        m3 = m3 && (r1_3 == b1.r);
+        if (!m0 && !m1 && !m2 && !m3) continue;
+      }
+
+      if (nb > 2) {
+        int r2_0, r2_1, r2_2, r2_3;
+        rotation_y4(xz2, y0 + b2.y, y1 + b2.y, y2 + b2.y, y3 + b2.y, r2_0, r2_1, r2_2, r2_3);
+        if (b2.side) {
+          r2_0 %= 2;
+          r2_1 %= 2;
+          r2_2 %= 2;
+          r2_3 %= 2;
+        }
+        m0 = m0 && (r2_0 == b2.r);
+        m1 = m1 && (r2_1 == b2.r);
+        m2 = m2 && (r2_2 == b2.r);
+        m3 = m3 && (r2_3 == b2.r);
+        if (!m0 && !m1 && !m2 && !m3) continue;
+      }
+
+      if (nb > 3) {
+        int r3_0, r3_1, r3_2, r3_3;
+        rotation_y4(xz3, y0 + b3.y, y1 + b3.y, y2 + b3.y, y3 + b3.y, r3_0, r3_1, r3_2, r3_3);
+        if (b3.side) {
+          r3_0 %= 2;
+          r3_1 %= 2;
+          r3_2 %= 2;
+          r3_3 %= 2;
+        }
+        m0 = m0 && (r3_0 == b3.r);
+        m1 = m1 && (r3_1 == b3.r);
+        m2 = m2 && (r3_2 == b3.r);
+        m3 = m3 && (r3_3 == b3.r);
+        if (!m0 && !m1 && !m2 && !m3) continue;
+      }
+
+      if (m0) {
+        uint8_t ok = 1;
+        #pragma unroll
+        for (uint32_t i = 4; i < nb; i++) {
+          Block b = load_block(blocks, i, nb);
+          int r = texture(x + b.x, y0 + b.y, z + b.z, b.side);
+          if (r != b.r) { ok = 0; break; }
+        }
+        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + yy - yoff;
+      }
+
+      if (m1) {
+        uint8_t ok = 1;
+        #pragma unroll
+        for (uint32_t i = 4; i < nb; i++) {
+          Block b = load_block(blocks, i, nb);
+          int r = texture(x + b.x, y1 + b.y, z + b.z, b.side);
+          if (r != b.r) { ok = 0; break; }
+        }
+        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 1) - yoff;
+      }
+
+      if (m2) {
+        uint8_t ok = 1;
+        #pragma unroll
+        for (uint32_t i = 4; i < nb; i++) {
+          Block b = load_block(blocks, i, nb);
+          int r = texture(x + b.x, y2 + b.y, z + b.z, b.side);
+          if (r != b.r) { ok = 0; break; }
+        }
+        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 2) - yoff;
+      }
+
+      if (m3) {
+        uint8_t ok = 1;
+        #pragma unroll
+        for (uint32_t i = 4; i < nb; i++) {
+          Block b = load_block(blocks, i, nb);
+          int r = texture(x + b.x, y3 + b.y, z + b.z, b.side);
+          if (r != b.r) { ok = 0; break; }
+        }
+        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 3) - yoff;
+      }
+    }
+
     for (; yy + 1 < end; yy += 2) {
       int32_t y0 = int32_t(int64_t(ymin) + yy);
       int32_t y1 = int32_t(int64_t(ymin) + (yy + 1));

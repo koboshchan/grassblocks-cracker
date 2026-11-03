@@ -27,6 +27,18 @@ uint2 rotation_y2(ulong xz,int y0,int y1){
  ulong s1=(((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
  return uint2(uint(s0>>46),uint(s1>>46));
 }
+uint4 rotation_y4(ulong xz,int y0,int y1,int y2,int y3){
+ ulong l0=xz^ulong(int64_t(y0)),l1=xz^ulong(int64_t(y1)),l2=xz^ulong(int64_t(y2)),l3=xz^ulong(int64_t(y3));
+ l0=l0*l0*42317861ULL+l0*11ULL;
+ l1=l1*l1*42317861ULL+l1*11ULL;
+ l2=l2*l2*42317861ULL+l2*11ULL;
+ l3=l3*l3*42317861ULL+l3*11ULL;
+ ulong s0=(((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ ulong s1=(((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ ulong s2=(((l2>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ ulong s3=(((l3>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
+ return uint4(uint(s0>>46),uint(s1>>46),uint(s2>>46),uint(s3>>46));
+}
 uint rotation(int x,int y,int z){
  return rotation_y(rotation_xz(x,z),y);
 }

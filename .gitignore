@@ -29,3 +29,4 @@ cuda/grass_solver.exe
 web/tests/*-result.json
 web/tests/*-WebGPU.json
 web/tests/APPLE-UI-QA.json
+bench-*/
