@@ -10,7 +10,7 @@ Native Metal. Actual M1:6901380069 origins,3.67462 seconds search,1.87812B/s (3.
 
 M2 WebGPU, actual AppleM2 Chrome. Inclusive x/z -5000..5000, y -64..319, all four norths.153630721536 origins in62.458 seconds,2.460B/s, sole3538 90 -454 north0. Warm cached±1000 search2.048B/s. GPU65536 signed32 hash cases and all nine variants with49161 exact dense matches passed. See M2-WebGPU.json. Owned Chrome was shut down and its debugging port verified free after the run.
 
-A100 and RTXPRO6000. No allocation or benchmark occurred. Colab preparation was source-pinned and validated offline, but the active Lumine controller requires zero provider assignments before continuing. A concurrent benchmark could block it, so these runs require a genuine nonoverlap window. Availability/quota not established. RunPod was not used. See COLAB-STATUS.md.
+A100 and RTXPRO6000. No allocation or benchmark occurred. Colab preparation was source-pinned and validated offline, but the active Lumine controller requires zero provider assignments before continuing. A concurrent benchmark could block it, so these runs require a genuine nonoverlap window. Availability/quota not established. RunPod was not used.
 
 SIMD detection kernel. Sandbox Node24 V8,7401 projected hill patches,4384 valid. JS922.0ms, WASM74.9ms,12.31x faster. All validity, rotation, quadrant-vote and acceptance decisions agree; maximum score difference2.96e-8 due toFloat32 results. A repeat under concurrent shader compilation and feature-detection work measured WASM431.4ms versus JS2251.0ms,5.22x. Timing is host/load dependent. This is projection/correlation kernel timing, not full image geometry detection or a Mac measurement.
 
