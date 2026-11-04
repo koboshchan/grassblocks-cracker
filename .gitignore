@@ -34,3 +34,6 @@ bench-*/
 # Generated formation outputs (fixtures live in */fixtures/)
 formation*.txt
 !**/fixtures/*.txt
+
+__pycache__/
+*.py[cod]
