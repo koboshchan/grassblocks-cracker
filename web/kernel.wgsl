@@ -43,7 +43,7 @@ fn rotation_y(xz:vec2<u32>,y:i32)->u32{
 fn rotation(x:i32,y:i32,z:i32)->u32{
  return rotation_y(rotation_xz(x,z),y);
 }
-struct Block {x:i32,y:i32,z:i32,r:i32,side:i32}
+struct Block {x:vec4<i32>,z:vec4<i32>,r:vec4<i32>,y:i32,side:i32}
 struct Params {xmin:i32,zmin:i32,ymin:i32,ymax:i32,width:u32,offset:u32,count:u32,blocks:u32}
 struct Results {count:atomic<u32>,xyz:array<vec4<i32>>}
 @group(0) @binding(0) var<storage,read> blocks:array<Block>;
@@ -59,71 +59,53 @@ fn search(@builtin(global_invocation_id) id:vec3<u32>){
  var qz=base_pos/p.width;
  var rx=base_pos-qz*p.width;
  let b0=blocks[0];
- let mask0=select(3u,1u,b0.side!=0);
- let target0=u32(b0.r);
+ let target0=u32(b0.r.x)&3u;
  var b1:Block;
  var mask1=0u;
- var target1=0u;
  if(p.blocks>1u){
   b1=blocks[1];
   mask1=select(3u,1u,b1.side!=0);
-  target1=u32(b1.r);
  }
  var b2:Block;
  var mask2=0u;
- var target2=0u;
  if(p.blocks>2u){
   b2=blocks[2];
   mask2=select(3u,1u,b2.side!=0);
-  target2=u32(b2.r);
  }
  var b3:Block;
  var mask3=0u;
- var target3=0u;
  if(p.blocks>3u){
   b3=blocks[3];
   mask3=select(3u,1u,b3.side!=0);
-  target3=u32(b3.r);
  }
  for(var item=0u;item<ITEMS;item++){
   let index=base_index+item;
   if(index>=p.count){return;}
   let x=p.xmin+i32(rx);let z=p.zmin+i32(qz);
-  let xz0=rotation_xz(x+b0.x,z+b0.z);
-  var xz1=vec2(0u,0u);
-  if(p.blocks>1u){
-   xz1=rotation_xz(x+b1.x,z+b1.z);
-  }
-  var xz2=vec2(0u,0u);
-  if(p.blocks>2u){
-   xz2=rotation_xz(x+b2.x,z+b2.z);
-  }
-  var xz3=vec2(0u,0u);
-  if(p.blocks>3u){
-   xz3=rotation_xz(x+b3.x,z+b3.z);
-  }
+  let xz0=rotation_xz(x,z);
   for(var y=p.ymin;y<=p.ymax;y++){
-   let r0=rotation_y(xz0,y+b0.y);
-   if((r0&mask0)!=target0){continue;}
+   let r0_val=rotation_y(xz0,y+b0.y);
+   let n=(r0_val-target0)&3u;
+   if(b0.r[n]<0||(b0.side!=0&&(u32(b0.side)&(1u<<n))==0u)){continue;}
    if(p.blocks>1u){
-    let r1=rotation_y(xz1,y+b1.y);
-    if((r1&mask1)!=target1){continue;}
+    let r1=rotation(x+b1.x[n],y+b1.y,z+b1.z[n]);
+    if((r1&mask1)!=u32(b1.r[n])){continue;}
    }
    if(p.blocks>2u){
-    let r2=rotation_y(xz2,y+b2.y);
-    if((r2&mask2)!=target2){continue;}
+    let r2=rotation(x+b2.x[n],y+b2.y,z+b2.z[n]);
+    if((r2&mask2)!=u32(b2.r[n])){continue;}
    }
    if(p.blocks>3u){
-    let r3 = rotation_y(xz3, y + b3.y);
-    if ((r3 & mask3) != target3) { continue; }
+    let r3=rotation(x+b3.x[n],y+b3.y,z+b3.z[n]);
+    if((r3&mask3)!=u32(b3.r[n])){continue;}
    }
    var matched=true;
    for(var i=4u;i<p.blocks;i++){
-    let b=blocks[i];let r=rotation(x+b.x,y+b.y,z+b.z);
+    let b=blocks[i];let r=rotation(x+b.x[n],y+b.y,z+b.z[n]);
     let mask=select(3u,1u,b.side!=0);
-    if((r&mask)!=u32(b.r)){matched=false;break;}
+    if((r&mask)!=u32(b.r[n])){matched=false;break;}
    }
-   if(matched){let i=atomicAdd(&results.count,1u);if(i<4096u){results.xyz[i]=vec4(x,y,z,0);}}
+   if(matched){let idx=atomicAdd(&results.count,1u);if(idx<4096u){results.xyz[idx]=vec4(x,y,z,i32(n));}}
   }
   rx++;
   if(rx==p.width){rx=0u;qz++;}

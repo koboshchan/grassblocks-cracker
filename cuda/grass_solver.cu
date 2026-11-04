@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <iomanip>
 
-__constant__ Block cached_blocks[1024];
+__constant__ Block cached_blocks[4 * 512];
 
 static uint32_t tuning(const char* name, uint32_t def, uint32_t lo, uint32_t hi) {
   const char* s = std::getenv(name);
@@ -92,16 +92,17 @@ __device__ __forceinline__ int texture(int32_t bx, int32_t by, int32_t bz, int s
   return r;
 }
 
-__device__ __forceinline__ Block load_block(const Block* __restrict__ blocks, uint32_t i, uint32_t nb) {
-  if (nb <= 1024) {
-    return cached_blocks[i];
+__device__ __forceinline__ Block load_block(const Block* __restrict__ blocks, int north, uint32_t i, uint32_t nb) {
+  if (nb <= 512) {
+    return cached_blocks[north * 512 + i];
   }
+  uint32_t idx = uint32_t(north) * nb + i;
   Block b;
-  b.x = __ldg(&blocks[i].x);
-  b.y = __ldg(&blocks[i].y);
-  b.z = __ldg(&blocks[i].z);
-  b.r = __ldg(&blocks[i].r);
-  b.side = __ldg(&blocks[i].side);
+  b.x = __ldg(&blocks[idx].x);
+  b.y = __ldg(&blocks[idx].y);
+  b.z = __ldg(&blocks[idx].z);
+  b.r = __ldg(&blocks[idx].r);
+  b.side = __ldg(&blocks[idx].side);
   return b;
 }
 
@@ -109,7 +110,8 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
                             uint32_t count, uint32_t items,
                             int32_t ymin, int32_t zmin,
                             uint32_t ny, uint32_t nz,
-                            uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase) {
+                            uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase,
+                            uint32_t north_mask, int32_t rA) {
   uint32_t first = (blockIdx.x * blockDim.x + threadIdx.x) * items;
   for (uint32_t j = 0; j < items; j++) {
     uint32_t task = first + j;
@@ -120,34 +122,7 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
     int32_t z = int32_t(int64_t(zmin) + zz);
     int32_t x = int32_t(int64_t(xbase) + zid / nz);
 
-    Block b0 = load_block(blocks, 0, nb);
-    uint64_t xz0 = rotation_xz(x + b0.x, z + b0.z);
-
-    Block b1{};
-    uint64_t xz1 = 0;
-    if (nb > 1) {
-      b1 = load_block(blocks, 1, nb);
-      xz1 = rotation_xz(x + b1.x, z + b1.z);
-    }
-
-    Block b2{};
-    uint64_t xz2 = 0;
-    if (nb > 2) {
-      b2 = load_block(blocks, 2, nb);
-      xz2 = rotation_xz(x + b2.x, z + b2.z);
-    }
-
-    Block b3{};
-    uint64_t xz3 = 0;
-    if (nb > 3) {
-      b3 = load_block(blocks, 3, nb);
-      xz3 = rotation_xz(x + b3.x, z + b3.z);
-    }
-
-    const int mask0 = b0.side ? 1 : 3;
-    const int mask1 = b1.side ? 1 : 3;
-    const int mask2 = b2.side ? 1 : 3;
-    const int mask3 = b3.side ? 1 : 3;
+    uint64_t xz0 = rotation_xz(x, z);
 
     uint32_t begin = (task == 0) ? yoff : 0u;
     uint32_t rem = count + yoff - task * ny;
@@ -161,85 +136,60 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
       int32_t y3 = int32_t(int64_t(ymin) + (yy + 3));
 
       int r0_0, r0_1, r0_2, r0_3;
-      rotation_y4(xz0, y0 + b0.y, r0_0, r0_1, r0_2, r0_3);
-      bool m0 = ((r0_0 & mask0) == b0.r);
-      bool m1 = ((r0_1 & mask0) == b0.r);
-      bool m2 = ((r0_2 & mask0) == b0.r);
-      bool m3 = ((r0_3 & mask0) == b0.r);
+      rotation_y4(xz0, y0, r0_0, r0_1, r0_2, r0_3);
+      int n0 = (r0_0 - rA) & 3;
+      int n1 = (r0_1 - rA) & 3;
+      int n2 = (r0_2 - rA) & 3;
+      int n3 = (r0_3 - rA) & 3;
+
+      bool m0 = (north_mask & (1u << n0)) != 0;
+      bool m1 = (north_mask & (1u << n1)) != 0;
+      bool m2 = (north_mask & (1u << n2)) != 0;
+      bool m3 = (north_mask & (1u << n3)) != 0;
       if (!m0 && !m1 && !m2 && !m3) continue;
-
-      if (nb > 1) {
-        int r1_0, r1_1, r1_2, r1_3;
-        rotation_y4(xz1, y0 + b1.y, r1_0, r1_1, r1_2, r1_3);
-        m0 = m0 && ((r1_0 & mask1) == b1.r);
-        m1 = m1 && ((r1_1 & mask1) == b1.r);
-        m2 = m2 && ((r1_2 & mask1) == b1.r);
-        m3 = m3 && ((r1_3 & mask1) == b1.r);
-        if (!m0 && !m1 && !m2 && !m3) continue;
-      }
-
-      if (nb > 2) {
-        int r2_0, r2_1, r2_2, r2_3;
-        rotation_y4(xz2, y0 + b2.y, r2_0, r2_1, r2_2, r2_3);
-        m0 = m0 && ((r2_0 & mask2) == b2.r);
-        m1 = m1 && ((r2_1 & mask2) == b2.r);
-        m2 = m2 && ((r2_2 & mask2) == b2.r);
-        m3 = m3 && ((r2_3 & mask2) == b2.r);
-        if (!m0 && !m1 && !m2 && !m3) continue;
-      }
-
-      if (nb > 3) {
-        int r3_0, r3_1, r3_2, r3_3;
-        rotation_y4(xz3, y0 + b3.y, r3_0, r3_1, r3_2, r3_3);
-        m0 = m0 && ((r3_0 & mask3) == b3.r);
-        m1 = m1 && ((r3_1 & mask3) == b3.r);
-        m2 = m2 && ((r3_2 & mask3) == b3.r);
-        m3 = m3 && ((r3_3 & mask3) == b3.r);
-        if (!m0 && !m1 && !m2 && !m3) continue;
-      }
 
       if (m0) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n0, i, nb);
           int r = texture(x + b.x, y0 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + yy - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30) | (task * ny + yy - yoff);
       }
 
       if (m1) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n1, i, nb);
           int r = texture(x + b.x, y1 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 1) - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n1) << 30) | (task * ny + (yy + 1) - yoff);
       }
 
       if (m2) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n2, i, nb);
           int r = texture(x + b.x, y2 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 2) - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n2) << 30) | (task * ny + (yy + 2) - yoff);
       }
 
       if (m3) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n3, i, nb);
           int r = texture(x + b.x, y3 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 3) - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n3) << 30) | (task * ny + (yy + 3) - yoff);
       }
     }
 
@@ -248,86 +198,50 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
       int32_t y1 = int32_t(int64_t(ymin) + (yy + 1));
 
       int r0_0, r0_1;
-      rotation_y2(xz0, y0 + b0.y, r0_0, r0_1);
-      bool m0 = ((r0_0 & mask0) == b0.r);
-      bool m1 = ((r0_1 & mask0) == b0.r);
+      rotation_y2(xz0, y0, r0_0, r0_1);
+      int n0 = (r0_0 - rA) & 3;
+      int n1 = (r0_1 - rA) & 3;
+      bool m0 = (north_mask & (1u << n0)) != 0;
+      bool m1 = (north_mask & (1u << n1)) != 0;
       if (!m0 && !m1) continue;
-
-      if (nb > 1) {
-        int r1_0, r1_1;
-        rotation_y2(xz1, y0 + b1.y, r1_0, r1_1);
-        m0 = m0 && ((r1_0 & mask1) == b1.r);
-        m1 = m1 && ((r1_1 & mask1) == b1.r);
-        if (!m0 && !m1) continue;
-      }
-
-      if (nb > 2) {
-        int r2_0, r2_1;
-        rotation_y2(xz2, y0 + b2.y, r2_0, r2_1);
-        m0 = m0 && ((r2_0 & mask2) == b2.r);
-        m1 = m1 && ((r2_1 & mask2) == b2.r);
-        if (!m0 && !m1) continue;
-      }
-
-      if (nb > 3) {
-        int r3_0, r3_1;
-        rotation_y2(xz3, y0 + b3.y, r3_0, r3_1);
-        m0 = m0 && ((r3_0 & mask3) == b3.r);
-        m1 = m1 && ((r3_1 & mask3) == b3.r);
-        if (!m0 && !m1) continue;
-      }
 
       if (m0) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n0, i, nb);
           int r = texture(x + b.x, y0 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + yy - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30) | (task * ny + yy - yoff);
       }
 
       if (m1) {
         uint8_t ok = 1;
         #pragma unroll
-        for (uint32_t i = 4; i < nb; i++) {
-          Block b = load_block(blocks, i, nb);
+        for (uint32_t i = 1; i < nb; i++) {
+          Block b = load_block(blocks, n1, i, nb);
           int r = texture(x + b.x, y1 + b.y, z + b.z, b.side);
           if (r != b.r) { ok = 0; break; }
         }
-        if (ok) results[atomicAdd(result_count, 1u)] = task * ny + (yy + 1) - yoff;
+        if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n1) << 30) | (task * ny + (yy + 1) - yoff);
       }
     }
 
     for (; yy < end; yy++) {
-      int32_t y = int32_t(int64_t(ymin) + yy);
-      int r0 = rotation_y(xz0, y + b0.y);
-      if ((r0 & mask0) != b0.r) continue;
-
-      if (nb > 1) {
-        int r1 = rotation_y(xz1, y + b1.y);
-        if ((r1 & mask1) != b1.r) continue;
-      }
-
-      if (nb > 2) {
-        int r2 = rotation_y(xz2, y + b2.y);
-        if ((r2 & mask2) != b2.r) continue;
-      }
-
-      if (nb > 3) {
-        int r3 = rotation_y(xz3, y + b3.y);
-        if ((r3 & mask3) != b3.r) continue;
-      }
+      int32_t y0 = int32_t(int64_t(ymin) + yy);
+      int r0 = rotation_y(xz0, y0);
+      int n0 = (r0 - rA) & 3;
+      if ((north_mask & (1u << n0)) == 0) continue;
 
       uint8_t ok = 1;
       #pragma unroll
-      for (uint32_t i = 4; i < nb; i++) {
-        Block b = load_block(blocks, i, nb);
-        int r = texture(x + b.x, y + b.y, z + b.z, b.side);
+      for (uint32_t i = 1; i < nb; i++) {
+        Block b = load_block(blocks, n0, i, nb);
+        int r = texture(x + b.x, y0 + b.y, z + b.z, b.side);
         if (r != b.r) { ok = 0; break; }
       }
-      if (ok) results[atomicAdd(result_count, 1u)] = task * ny + yy - yoff;
+      if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30) | (task * ny + yy - yoff);
     }
   }
 }
@@ -335,7 +249,8 @@ __global__ void __launch_bounds__(512, 2) search_fast(const Block* __restrict__ 
 __global__ void search_wide(const Block* __restrict__ blocks, uint32_t nb, uint32_t* results, uint32_t* result_count,
                             uint64_t base, uint32_t count, uint32_t items,
                             int32_t xmin, int32_t ymin, int32_t zmin,
-                            uint64_t ny, uint64_t nz) {
+                            uint64_t ny, uint64_t nz,
+                            uint32_t north_mask, int32_t rA) {
   uint32_t first = (blockIdx.x * blockDim.x + threadIdx.x) * items;
   for (uint32_t j = 0; j < items; j++) {
     uint32_t tid = first + j;
@@ -346,18 +261,18 @@ __global__ void search_wide(const Block* __restrict__ blocks, uint32_t nb, uint3
     int32_t z = int32_t(int64_t(zmin) + int64_t(id % nz)); id /= nz;
     int32_t x = int32_t(int64_t(xmin) + int64_t(id));
 
-    Block b0 = load_block(blocks, 0, nb);
-    int r0 = texture(x + b0.x, y + b0.y, z + b0.z, b0.side);
-    if (r0 != b0.r) continue;
+    int r0 = rotation_y(rotation_xz(x, z), y);
+    int n = (r0 - rA) & 3;
+    if ((north_mask & (1u << n)) == 0) continue;
 
     uint8_t ok = 1;
     #pragma unroll
     for (uint32_t i = 1; i < nb; i++) {
-      Block b = load_block(blocks, i, nb);
+      Block b = load_block(blocks, n, i, nb);
       int r = texture(x + b.x, y + b.y, z + b.z, b.side);
       if (r != b.r) { ok = 0; break; }
     }
-    if (ok) results[atomicAdd(result_count, 1u)] = tid;
+    if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n) << 30) | tid;
   }
 }
 
@@ -365,7 +280,8 @@ struct Tune { uint32_t threads = 128, items = 1; };
 
 static Tune autotune(const cudaDeviceProp& prop, Block* db, const std::vector<Block>& tuneBlocks,
                      uint32_t* df, uint32_t* dc, cudaStream_t stream,
-                     const Options& o, const std::string& mode, bool fast, uint32_t batch) {
+                     const Options& o, const std::string& mode, bool fast, uint32_t batch,
+                     uint32_t north_mask, int32_t rA) {
   Tune fallback{128, 1};
   bool manual = std::getenv("GRASS_THREADS") || std::getenv("GRASS_ITEMS");
   if (manual) {
@@ -380,7 +296,8 @@ static Tune autotune(const cudaDeviceProp& prop, Block* db, const std::vector<Bl
   }
 
   std::string key = std::string(prop.name) + "/" + std::to_string(prop.major) + "." + std::to_string(prop.minor) +
-                    "/columns-v1/" + std::to_string(o.dim[1]) + "/" + std::to_string(o.dim[2]);
+                    "/columns-v2/" + std::to_string(o.dim[1]) + "/" + std::to_string(o.dim[2]);
+  key += "/mask=" + std::to_string(north_mask) + "/rA=" + std::to_string(rA);
   for (auto b : tuneBlocks)
     key += "/" + std::to_string(b.x) + "," + std::to_string(b.y) + "," + std::to_string(b.z) + "," +
            std::to_string(b.r) + "," + std::to_string(b.side);
@@ -428,11 +345,12 @@ static Tune autotune(const cudaDeviceProp& prop, Block* db, const std::vector<Bl
           search_fast<<<(tasks + t * it - 1) / (t * it), t, 0, stream>>>(
               db, uint32_t(tuneBlocks.size()), df, dc,
               n, it, o.lo[1], o.lo[2], uint32_t(o.dim[1]), uint32_t(o.dim[2]),
-              tasks, 0, 0, o.lo[0]);
+              tasks, 0, 0, o.lo[0], north_mask, rA);
         } else {
           search_wide<<<(n + t * it - 1) / (t * it), t, 0, stream>>>(
               db, uint32_t(tuneBlocks.size()), df, dc,
-              0, n, it, o.lo[0], o.lo[1], o.lo[2], o.dim[1], o.dim[2]);
+              0, n, it, o.lo[0], o.lo[1], o.lo[2], o.dim[1], o.dim[2],
+              north_mask, rA);
         }
         check(cudaGetLastError());
       };
@@ -479,6 +397,17 @@ static Tune autotune(const cudaDeviceProp& prop, Block* db, const std::vector<Bl
   return selected;
 }
 
+static void rotate_coords(int32_t x, int32_t z, int n, int32_t& rx, int32_t& rz) {
+  int64_t cx = x, cz = z;
+  for (int j = 0; j < n; j++) {
+    int64_t old = cx;
+    cx = -cz;
+    cz = old;
+  }
+  rx = coord(cx);
+  rz = coord(cz);
+}
+
 int main(int argc, char** argv) {
   try {
     std::string mode = "auto";
@@ -499,11 +428,55 @@ int main(int argc, char** argv) {
     // Validate every north before creating a device context or printing partial results.
     for (int n : o.north) orient(original, n, o);
 
+    // 1. Pick anchor block (first top face with side == 0)
+    size_t anchor_idx = 0;
+    while (anchor_idx < original.size() && original[anchor_idx].side != 0) {
+      anchor_idx++;
+    }
+    if (anchor_idx >= original.size()) {
+      anchor_idx = 0;
+    }
+
+    int32_t xA = original[anchor_idx].x;
+    int32_t yA = original[anchor_idx].y;
+    int32_t zA = original[anchor_idx].z;
+    int rA = original[anchor_idx].r;
+
+    if (anchor_idx != 0) {
+      std::swap(original[0], original[anchor_idx]);
+    }
+
+    for (auto& b : original) {
+      b.x -= xA;
+      b.y -= yA;
+      b.z -= zA;
+    }
+
     const uint32_t batch = tuning("GRASS_BATCH", 4194304, 256, 16777216);
     bool fast = o.dim[1] <= 4096 && o.dim[2] <= uint64_t(UINT32_MAX - 4194304u) && !std::getenv("GRASS_CUDA_FORCE_WIDE");
 
+    size_t slot_blocks = std::max<size_t>(512, original.size());
     Block *db = nullptr;
-    check(cudaMalloc((void**)&db, original.size() * sizeof(Block)));
+    check(cudaMalloc((void**)&db, 4 * slot_blocks * sizeof(Block)));
+
+    // 2. Compute oriented formations for all requested norths n in o.north
+    Block all_cached[4 * 512] = {};
+    std::vector<Block> host_blocks(4 * slot_blocks);
+    uint32_t north_mask = 0;
+    for (int n : o.north) {
+      north_mask |= (1u << n);
+      auto oriented = orient(original, n, o);
+      if (oriented.size() > 1) {
+        std::stable_sort(oriented.begin() + 1, oriented.end(),
+                         [](const Block& a, const Block& b) { return a.side < b.side; });
+      }
+      for (size_t i = 0; i < oriented.size(); i++) {
+        if (i < 512) all_cached[n * 512 + i] = oriented[i];
+        host_blocks[n * slot_blocks + i] = oriented[i];
+      }
+    }
+    check(cudaMemcpy(db, host_blocks.data(), host_blocks.size() * sizeof(Block), cudaMemcpyHostToDevice));
+    check(cudaMemcpyToSymbol(cached_blocks, all_cached, sizeof(all_cached)));
 
     cudaStream_t streams[2] = {nullptr, nullptr};
     uint32_t *df[2] = {nullptr, nullptr};
@@ -522,12 +495,7 @@ int main(int argc, char** argv) {
     cudaDeviceProp prop{};
     check(cudaGetDeviceProperties(&prop, 0));
 
-    auto tuneBlocks = orient(original, o.north[0], o);
-    std::stable_sort(tuneBlocks.begin(), tuneBlocks.end(), [](const Block& a, const Block& b) { return a.side < b.side; });
-    check(cudaMemcpy(db, tuneBlocks.data(), tuneBlocks.size() * sizeof(Block), cudaMemcpyHostToDevice));
-    if (tuneBlocks.size() <= 1024) check(cudaMemcpyToSymbol(cached_blocks, tuneBlocks.data(), tuneBlocks.size() * sizeof(Block)));
-
-    Tune tune = autotune(prop, db, tuneBlocks, df[0], dc[0], streams[0], o, mode, fast, batch);
+    Tune tune = autotune(prop, db, original, df[0], dc[0], streams[0], o, mode, fast, batch, north_mask, rA);
     uint32_t threads = tune.threads;
     uint32_t items = tune.items;
 
@@ -540,95 +508,95 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, stop_search);
     std::signal(SIGTERM, stop_search);
 
-    for (int north : o.north) {
-      auto blocks = orient(original, north, o);
-      // Tops reject 75% versus sides 50%; stable ordering preserves equal-information rows.
-      std::stable_sort(blocks.begin(), blocks.end(), [](const Block& a, const Block& b) { return a.side < b.side; });
-      if (blocks.size() <= 1024) check(cudaMemcpyToSymbol(cached_blocks, blocks.data(), blocks.size() * sizeof(Block)));
-      check(cudaMemcpy(db, blocks.data(), blocks.size() * sizeof(Block), cudaMemcpyHostToDevice));
-
-      struct BatchInfo {
-        uint64_t base = 0;
-        uint32_t count = 0;
-        bool active = false;
-      } slot_info[2];
-
-      auto launch_slot = [&](int s, uint64_t b, uint32_t cnt) {
-        slot_info[s].base = b;
-        slot_info[s].count = cnt;
-        slot_info[s].active = true;
-        check(cudaMemsetAsync(dc[s], 0, sizeof(uint32_t), streams[s]));
-        if (fast) {
-          uint64_t origin = b;
-          uint32_t yoff = uint32_t(origin % o.dim[1]); origin /= o.dim[1];
-          uint32_t zoff = uint32_t(origin % o.dim[2]); origin /= o.dim[2];
-          int32_t xbase = int32_t(int64_t(o.lo[0]) + int64_t(origin));
-          uint32_t tasks = uint32_t((cnt + yoff + o.dim[1] - 1) / o.dim[1]);
-          uint32_t grid = (tasks + threads * items - 1) / (threads * items);
-          search_fast<<<grid, threads, 0, streams[s]>>>(
-              db, uint32_t(blocks.size()), df[s], dc[s],
-              cnt, items, o.lo[1], o.lo[2], uint32_t(o.dim[1]), uint32_t(o.dim[2]),
-              tasks, yoff, zoff, xbase);
-        } else {
-          uint32_t grid = (cnt + threads * items - 1) / (threads * items);
-          search_wide<<<grid, threads, 0, streams[s]>>>(
-              db, uint32_t(blocks.size()), df[s], dc[s],
-              b, cnt, items, o.lo[0], o.lo[1], o.lo[2], o.dim[1], o.dim[2]);
-        }
-        check(cudaGetLastError());
-        check(cudaMemcpyAsync(host_count[s], dc[s], sizeof(uint32_t), cudaMemcpyDeviceToHost, streams[s]));
-      };
-
-      auto harvest_slot = [&](int s) {
-        if (!slot_info[s].active) return;
-        check(cudaStreamSynchronize(streams[s]));
-        slot_info[s].active = false;
-        uint32_t found = *host_count[s];
-        if (found > slot_info[s].count) throw std::runtime_error("Invalid GPU result count");
-        if (found > 0) {
-          check(cudaMemcpy(host_results[s], df[s], size_t(found) * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-          std::sort(host_results[s], host_results[s] + found);
-          for (uint32_t i = 0; i < found; i++) {
-            int32_t x, y, z;
-            decode(slot_info[s].base + host_results[s][i], o, x, y, z);
-            std::cout << x << " " << y << " " << z << " " << north << "\n";
-            matches++;
-          }
-          if (!std::cout) throw std::runtime_error("Output write failed");
-        }
-        done += slot_info[s].count;
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - last).count() >= 1) {
-          double sec = std::chrono::duration<double>(now - start).count();
-          std::cerr << "progress " << done << "/" << o.total * o.north.size()
-                    << " rate " << double(done) / sec << " candidates/s matches " << matches << "\n";
-          last = now;
-        }
-      };
-
+    struct BatchInfo {
       uint64_t base = 0;
-      int cur = 0;
-      while ((base < o.total || slot_info[0].active || slot_info[1].active) && !stopped) {
-        if (slot_info[cur].active) {
-          harvest_slot(cur);
-        }
-        if (base < o.total && !stopped) {
-          uint32_t count = uint32_t(std::min<uint64_t>(batch, o.total - base));
-          launch_slot(cur, base, count);
-          base += count;
-        }
-        cur = 1 - cur;
+      uint32_t count = 0;
+      bool active = false;
+    } slot_info[2];
+
+    auto launch_slot = [&](int s, uint64_t b, uint32_t cnt) {
+      slot_info[s].base = b;
+      slot_info[s].count = cnt;
+      slot_info[s].active = true;
+      check(cudaMemsetAsync(dc[s], 0, sizeof(uint32_t), streams[s]));
+      if (fast) {
+        uint64_t origin = b;
+        uint32_t yoff = uint32_t(origin % o.dim[1]); origin /= o.dim[1];
+        uint32_t zoff = uint32_t(origin % o.dim[2]); origin /= o.dim[2];
+        int32_t xbase = int32_t(int64_t(o.lo[0]) + int64_t(origin));
+        uint32_t tasks = uint32_t((cnt + yoff + o.dim[1] - 1) / o.dim[1]);
+        uint32_t grid = (tasks + threads * items - 1) / (threads * items);
+        search_fast<<<grid, threads, 0, streams[s]>>>(
+            db, uint32_t(original.size()), df[s], dc[s],
+            cnt, items, o.lo[1], o.lo[2], uint32_t(o.dim[1]), uint32_t(o.dim[2]),
+            tasks, yoff, zoff, xbase, north_mask, rA);
+      } else {
+        uint32_t grid = (cnt + threads * items - 1) / (threads * items);
+        search_wide<<<grid, threads, 0, streams[s]>>>(
+            db, uint32_t(original.size()), df[s], dc[s],
+            b, cnt, items, o.lo[0], o.lo[1], o.lo[2], o.dim[1], o.dim[2],
+            north_mask, rA);
       }
-      for (int s = 0; s < 2; s++) {
-        if (slot_info[s].active) {
-          if (!stopped) harvest_slot(s);
-          else {
-            cudaStreamSynchronize(streams[s]);
-            slot_info[s].active = false;
-          }
+      check(cudaGetLastError());
+      check(cudaMemcpyAsync(host_count[s], dc[s], sizeof(uint32_t), cudaMemcpyDeviceToHost, streams[s]));
+    };
+
+    auto harvest_slot = [&](int s) {
+      if (!slot_info[s].active) return;
+      check(cudaStreamSynchronize(streams[s]));
+      slot_info[s].active = false;
+      uint32_t found = *host_count[s];
+      if (found > slot_info[s].count) throw std::runtime_error("Invalid GPU result count");
+      if (found > 0) {
+        check(cudaMemcpy(host_results[s], df[s], size_t(found) * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+        std::sort(host_results[s], host_results[s] + found);
+        for (uint32_t i = 0; i < found; i++) {
+          uint32_t val = host_results[s][i];
+          int north = int(val >> 30);
+          uint32_t offset = val & 0x3FFFFFFFu;
+          int32_t x, y, z;
+          decode(slot_info[s].base + offset, o, x, y, z);
+          int32_t rx, rz;
+          rotate_coords(xA, zA, north, rx, rz);
+          x -= rx;
+          y -= yA;
+          z -= rz;
+          std::cout << x << " " << y << " " << z << " " << north << "\n";
+          matches++;
+        }
+        if (!std::cout) throw std::runtime_error("Output write failed");
+      }
+      done += slot_info[s].count;
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration<double>(now - last).count() >= 1) {
+        double sec = std::chrono::duration<double>(now - start).count();
+        std::cerr << "progress " << done << "/" << o.total
+                  << " rate " << double(done) / sec << " candidates/s matches " << matches << "\n";
+        last = now;
+      }
+    };
+
+    uint64_t base = 0;
+    int cur = 0;
+    while ((base < o.total || slot_info[0].active || slot_info[1].active) && !stopped) {
+      if (slot_info[cur].active) {
+        harvest_slot(cur);
+      }
+      if (base < o.total && !stopped) {
+        uint32_t count = uint32_t(std::min<uint64_t>(batch, o.total - base));
+        launch_slot(cur, base, count);
+        base += count;
+      }
+      cur = 1 - cur;
+    }
+    for (int s = 0; s < 2; s++) {
+      if (slot_info[s].active) {
+        if (!stopped) harvest_slot(s);
+        else {
+          cudaStreamSynchronize(streams[s]);
+          slot_info[s].active = false;
         }
       }
-      if (stopped) break;
     }
 
     double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

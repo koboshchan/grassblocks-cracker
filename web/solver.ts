@@ -6,6 +6,41 @@ export async function createSolver({backend='auto',workers}:{backend?:'auto'|'cp
  }
  return cpuSolver(workers);
 }
+function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
+ const anchorIdx = Math.max(0, blocks.findIndex(b => b.is_side === 0));
+ const anchor = blocks[anchorIdx] || blocks[0];
+ const xA = anchor.x, yA = anchor.y, zA = anchor.z, rA = anchor.rotation;
+ const centered = [anchor, ...blocks.filter((_, i) => i !== anchorIdx)].map(b => ({
+  ...b,
+  x: b.x - xA,
+  y: b.y - yA,
+  z: b.z - zA,
+ }));
+ const data = new Int32Array(centered.length * 16);
+ for (let i = 0; i < centered.length; i++) {
+  const b = centered[i];
+  const off = i * 16;
+  for (let n = 0; n < 4; n++) {
+   if (activeNorth.includes(n)) {
+    let x = b.x, z = b.z;
+    for (let j = 0; j < n; j++) [x, z] = [-z, x];
+    data[off + n] = x;
+    data[off + 4 + n] = z;
+    data[off + 8 + n] = (b.rotation + n) % (b.is_side ? 2 : 4);
+   } else {
+    data[off + n] = 0;
+    data[off + 4 + n] = 0;
+    data[off + 8 + n] = -1;
+   }
+  }
+  data[off + 12] = b.y;
+  data[off + 13] = b.is_side;
+  data[off + 14] = 0;
+  data[off + 15] = 0;
+ }
+ return { data, xA, yA, zA, rA };
+}
+
 async function gpuSolver(){
  const adapter=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});
  if(!adapter)throw Error('No WebGPU adapter. Try the WASM CPU mode or a native solver.');
@@ -43,7 +78,8 @@ async function gpuSolver(){
  const limit=opts.stopOnFirst?1:(opts.maxMatches??100000);
  const stopReason=()=>stopped?(opts.stopOnFirst?'first match':'result limit'):undefined;
  const emit=()=>opts.onProgress?.({done,total,seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)});
- blockBuffer=device.createBuffer({size:blocks.length*20,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+ const packed = packMultiNorthBlocks(blocks, opts.north);
+ blockBuffer=device.createBuffer({size:Math.max(64, packed.data.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
  const groups=Array.from({length:RING_SIZE},(_,i)=>device.createBindGroup({
   layout:blockLayout,
   entries:[
@@ -57,9 +93,9 @@ async function gpuSolver(){
   device.queue.writeBuffer(params[i],0,par);
   device.queue.writeBuffer(results[i],0,zero4);
  }
+ device.queue.writeBuffer(blockBuffer,0,packed.data);
  let target=65536;
  if(!tuned){
- device.queue.writeBuffer(blockBuffer,0,new Int32Array(turnBlocks(blocks,opts.north[0]).flatMap(b=>[b.x,b.y,b.z,b.rotation,b.is_side])));
  let cached:any=null;try{cached=JSON.parse(localStorage.getItem(cacheKey)||'null');}catch{}
  if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
  wg=cached.wg;items=cached.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...cached,cached:true};
@@ -83,13 +119,13 @@ async function gpuSolver(){
  }
 
  let currentSlot=0;
- function submitChunk(slot:number,x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number,n:number):InFlightTask{
+ function submitChunk(slot:number,x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number):InFlightTask{
   par[0]=x;par[1]=z;par[2]=ya;par[3]=yb;par[4]=width;par[5]=offset;par[6]=count;par[7]=blocks.length;
   device.queue.writeBuffer(params[slot],0,par);device.queue.writeBuffer(results[slot],0,zero4);
   const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,groups[slot]);pass.dispatchWorkgroups(Math.ceil(count/(wg*items)));pass.end();
   enc.copyBufferToBuffer(results[slot],0,reads[slot],0,resultSize);device.queue.submit([enc.finish()]);
   const mapPromise=reads[slot].mapAsync(GPUMapMode.READ);
-  return {slot,x,z,width,offset,count,ya,yb,n,tSubmit:performance.now(),mapPromise};
+  return {slot,x,z,width,offset,count,ya,yb,n:0,tSubmit:performance.now(),mapPromise};
  }
 
  async function processTask(task:InFlightTask){
@@ -103,21 +139,28 @@ async function gpuSolver(){
   if(found>4096){
    read.unmap();
    await flush();
-   if(task.count>1){const half=Math.floor(task.count/2);await dispatchChunk(task.x,task.z,task.width,task.offset,half,task.ya,task.yb,task.n);await dispatchChunk(task.x,task.z,task.width,task.offset+half,task.count-half,task.ya,task.yb,task.n);}
-   else if(task.ya<task.yb){const mid=Math.floor((task.ya+task.yb)/2);await dispatchChunk(task.x,task.z,task.width,task.offset,task.count,task.ya,mid,task.n);await dispatchChunk(task.x,task.z,task.width,task.offset,task.count,mid+1,task.yb,task.n);}
+   if(task.count>1){const half=Math.floor(task.count/2);await dispatchChunk(task.x,task.z,task.width,task.offset,half,task.ya,task.yb);await dispatchChunk(task.x,task.z,task.width,task.offset+half,task.count-half,task.ya,task.yb);}
+   else if(task.ya<task.yb){const mid=Math.floor((task.ya+task.yb)/2);await dispatchChunk(task.x,task.z,task.width,task.offset,task.count,task.ya,mid);await dispatchChunk(task.x,task.z,task.width,task.offset,task.count,mid+1,task.yb);}
    else throw Error('GPU result capacity exceeded.');
    return;
   }
-  for(let i=0;i<found&&matches.length<limit;i++){const j=4+i*4;const m={x:mapped[j],y:mapped[j+1],z:mapped[j+2],north:task.n};matches.push(m);opts.onMatch?.(m);}
+  for(let i=0;i<found&&matches.length<limit;i++){
+   const j=4+i*4;
+   const wx=mapped[j],wy=mapped[j+1],wz=mapped[j+2],n=mapped[j+3];
+   let rx=packed.xA, rz=packed.zA;
+   for(let k=0;k<n;k++) [rx,rz]=[-rz,rx];
+   const m={x:wx-rx,y:wy-packed.yA,z:wz-rz,north:n};
+   matches.push(m);opts.onMatch?.(m);
+  }
   read.unmap();
   if(matches.length>=limit)stopped=true;
-  done+=task.count*(task.yb-task.ya+1);
+  done+=task.count*(task.yb-task.ya+1)*opts.north.length;
   emit();
  }
 
- async function dispatchChunk(x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number,n:number){
+ async function dispatchChunk(x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number){
   if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)return;
-  const nextTask=submitChunk(currentSlot,x,z,width,offset,count,ya,yb,n);
+  const nextTask=submitChunk(currentSlot,x,z,width,offset,count,ya,yb);
   currentSlot=(currentSlot+1)%RING_SIZE;
   inFlight.push(nextTask);
   if(inFlight.length>=RING_SIZE){
@@ -135,10 +178,7 @@ async function gpuSolver(){
  }
 
  let lastYield=performance.now();
- for(const n of opts.north){
-  await opts.waitIfPaused?.();if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)break;
-  device.queue.writeBuffer(blockBuffer,0,new Int32Array(turnBlocks(blocks,n).flatMap(b=>[b.x,b.y,b.z,b.rotation,b.is_side])));
-  for(let ya=opts.ymin;ya<=opts.ymax;ya+=32){
+ for(let ya=opts.ymin;ya<=opts.ymax;ya+=32){
   const yb=Math.min(opts.ymax,ya+31);
   for(let za=opts.zmin;za<=opts.zmax;za+=128){
   const zh=Math.min(128,opts.zmax-za+1);
@@ -147,7 +187,7 @@ async function gpuSolver(){
   for(let off=0;off<size;){
   await opts.waitIfPaused?.();if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)break;
   const count=Math.min(target,size-off);
-  await dispatchChunk(xa,za,width,off,count,ya,yb,n);
+  await dispatchChunk(xa,za,width,off,count,ya,yb);
   off+=count;
   if(performance.now()-lastYield>=16){await new Promise(r=>setTimeout(r,0));lastYield=performance.now();}
   }
@@ -156,8 +196,6 @@ async function gpuSolver(){
   if(opts.signal?.aborted||stopped)break;
   }
   if(opts.signal?.aborted||stopped)break;
-  }
-  await flush();
  }
  await flush();
  emit();const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!opts.signal?.aborted,stopped,stopReason:stopReason()};

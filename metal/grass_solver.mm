@@ -3,12 +3,12 @@
 #include "solver_common.h"
 #include <cstring>
 #include <cstdlib>
-struct Params {uint64_t base,ny,nz;uint32_t count,nb;int32_t xmin,ymin,zmin;uint32_t items,threads,fast,yoff,zoff;int32_t xbase;};
+struct Params {uint64_t base,ny,nz;uint32_t count,nb;int32_t xmin,ymin,zmin;uint32_t items,threads,fast,yoff,zoff;int32_t xbase;uint32_t active_norths;int32_t anchor_r,anchor_side;};
 static const char*source=R"MSL(#include <metal_stdlib>
 using namespace metal;
 typedef uint uint32_t;typedef int int32_t;typedef ulong uint64_t;typedef long int64_t;typedef uchar uint8_t;
 struct Block {int x,y,z,r,side;};
-struct Params {ulong base,ny,nz;uint count,nb;int xmin,ymin,zmin;uint items,threads,fast,yoff,zoff;int xbase;};
+struct Params {ulong base,ny,nz;uint count,nb;int xmin,ymin,zmin;uint items,threads,fast,yoff,zoff;int xbase;uint active_norths;int anchor_r,anchor_side;};
 ulong rotation_xz(int x,int z){
  int xp=as_type<int>(uint(x)*3129871u);
  return ulong(int64_t(xp))^(ulong(int64_t(z))*116129781ULL);
@@ -42,14 +42,42 @@ uint4 rotation_y4(ulong xz,int y0,int y1,int y2,int y3){
 uint rotation(int x,int y,int z){
  return rotation_y(rotation_xz(x,z),y);
 }
-bool matched(device const Block*blocks,uint nb,int x,int y,int z,uint start=0){
- for(uint i=start;i<nb;i++){
-  Block b=blocks[i];uint r=rotation(x+b.x,y+b.y,z+b.z);
-  if((r&(b.side?1u:3u))!=uint(b.r))return false;
+void emit(device uint*results,uint val){uint slot=atomic_fetch_add_explicit((device atomic_uint*)results,1u,memory_order_relaxed);results[slot+1]=val;}
+bool matched_north(device const Block*blocks,uint nb,uint north,int x,int y,int z){
+ device const Block*b=blocks+north*nb;
+ uint bound=min(nb,8u);
+ #pragma unroll
+ for(uint i=1;i<8;i++){
+  if(i>=bound)break;
+  Block bi=b[i];
+  uint r=rotation(x+bi.x,y+bi.y,z+bi.z);
+  if((r&(bi.side?1u:3u))!=uint(bi.r))return false;
+ }
+ for(uint i=8;i<nb;i++){
+  Block bi=b[i];
+  uint r=rotation(x+bi.x,y+bi.y,z+bi.z);
+  if((r&(bi.side?1u:3u))!=uint(bi.r))return false;
  }
  return true;
 }
-void emit(device uint*results,uint index){uint slot=atomic_fetch_add_explicit((device atomic_uint*)results,1u,memory_order_relaxed);results[slot+1]=index;}
+inline void check_anchor(device const Block*blocks,device uint*results,constant Params&p,
+ uint index,int x,int y,int z,uint rot){
+ if(p.anchor_side){
+  uint n0=(rot-uint(p.anchor_r))&1u;
+  if((p.active_norths&(1u<<n0))&&matched_north(blocks,p.nb,n0,x,y,z)){
+   emit(results,(index<<2)|n0);
+  }
+  uint n1=n0+2u;
+  if((p.active_norths&(1u<<n1))&&matched_north(blocks,p.nb,n1,x,y,z)){
+   emit(results,(index<<2)|n1);
+  }
+ }else{
+  uint n=(rot-uint(p.anchor_r))&3u;
+  if((p.active_norths&(1u<<n))&&matched_north(blocks,p.nb,n,x,y,z)){
+   emit(results,(index<<2)|n);
+  }
+ }
+}
 kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [[buffer(1)]],constant Params&p [[buffer(2)]],uint tid [[thread_position_in_grid]]){
  for(uint item=0;item<p.items;item++){
   uint task=tid+item*p.threads;
@@ -60,123 +88,19 @@ kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [
    int z=int(int64_t(p.zmin)+zz),x=int(int64_t(p.xbase)+zid/nz);
    uint begin=task==0?p.yoff:0u;
    uint end=min(ny,p.count+p.yoff-task*ny);
-   Block b0=blocks[0];
-   uint mask0=b0.side?1u:3u;
-   uint target0=uint(b0.r);
-   ulong xz0=rotation_xz(x+b0.x,z+b0.z);
-   Block b1;uint mask1=0,target1=0;ulong xz1=0;
-   if(p.nb>1){
-    b1=blocks[1];
-    mask1=b1.side?1u:3u;
-    target1=uint(b1.r);
-    xz1=rotation_xz(x+b1.x,z+b1.z);
-   }
-   Block b2;uint mask2=0,target2=0;ulong xz2=0;
-   if(p.nb>2){
-    b2=blocks[2];
-    mask2=b2.side?1u:3u;
-    target2=uint(b2.r);
-    xz2=rotation_xz(x+b2.x,z+b2.z);
-   }
-   Block b3;uint mask3=0,target3=0;ulong xz3=0;
-   if(p.nb>3){
-    b3=blocks[3];
-    mask3=b3.side?1u:3u;
-    target3=uint(b3.r);
-    xz3=rotation_xz(x+b3.x,z+b3.z);
-   }
+   ulong xz0=rotation_xz(x,z);
    uint yy=begin;
    for(;yy+1u<end;yy+=2u){
     int yA=int(int64_t(p.ymin)+yy);
     int yB=yA+1;
-    uint2 r0=rotation_y2(xz0,yA+b0.y,yB+b0.y);
-    bool passA=(r0.x&mask0)==target0;
-    bool passB=(r0.y&mask0)==target0;
-    if(!passA&&!passB)continue;
-    if(p.nb>1){
-     uint2 r1=rotation_y2(xz1,yA+b1.y,yB+b1.y);
-     passA=passA&((r1.x&mask1)==target1);
-     passB=passB&((r1.y&mask1)==target1);
-     if(!passA&&!passB)continue;
-    }
-    if(p.nb>2){
-     uint2 r2=rotation_y2(xz2,yA+b2.y,yB+b2.y);
-     passA=passA&((r2.x&mask2)==target2);
-     passB=passB&((r2.y&mask2)==target2);
-     if(!passA&&!passB)continue;
-    }
-    if(p.nb>3){
-     uint2 r3=rotation_y2(xz3,yA+b3.y,yB+b3.y);
-     passA=passA&((r3.x&mask3)==target3);
-     passB=passB&((r3.y&mask3)==target3);
-     if(!passA&&!passB)continue;
-    }
-    if(passA){
-     bool ok=true;
-     if(p.nb>4){
-      if(p.nb<=8){
-       #pragma unroll
-       for(uint i=4;i<8;i++){
-        if(i>=p.nb)break;
-        Block b=blocks[i];
-        uint r=rotation(x+b.x,yA+b.y,z+b.z);
-        if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
-       }
-      }else{
-       ok=matched(blocks,p.nb,x,yA,z,4);
-      }
-     }
-     if(ok)emit(results,task*ny+yy-p.yoff);
-    }
-    if(passB){
-     bool ok=true;
-     if(p.nb>4){
-      if(p.nb<=8){
-       #pragma unroll
-       for(uint i=4;i<8;i++){
-        if(i>=p.nb)break;
-        Block b=blocks[i];
-        uint r=rotation(x+b.x,yB+b.y,z+b.z);
-        if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
-       }
-      }else{
-       ok=matched(blocks,p.nb,x,yB,z,4);
-      }
-     }
-     if(ok)emit(results,task*ny+(yy+1u)-p.yoff);
-    }
+    uint2 r0=rotation_y2(xz0,yA,yB);
+    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,yA,z,r0.x);
+    check_anchor(blocks,results,p,task*ny+(yy+1u)-p.yoff,x,yB,z,r0.y);
    }
    for(;yy<end;yy++){
     int y=int(int64_t(p.ymin)+yy);
-    uint r0=rotation_y(xz0,y+b0.y);
-    if((r0&mask0)!=target0)continue;
-    if(p.nb>1){
-     uint r1=rotation_y(xz1,y+b1.y);
-     if((r1&mask1)!=target1)continue;
-    }
-    if(p.nb>2){
-     uint r2=rotation_y(xz2,y+b2.y);
-     if((r2&mask2)!=target2)continue;
-    }
-    if(p.nb>3){
-     uint r3=rotation_y(xz3,y+b3.y);
-     if((r3&mask3)!=target3)continue;
-    }
-    bool ok=true;
-    if(p.nb>4){
-     if(p.nb<=8){
-      #pragma unroll
-      for(uint i=4;i<8;i++){
-       if(i>=p.nb)break;
-       Block b=blocks[i];
-       uint r=rotation(x+b.x,y+b.y,z+b.z);
-       if((r&(b.side?1u:3u))!=uint(b.r)){ok=false;break;}
-      }
-     }else{
-      ok=matched(blocks,p.nb,x,y,z,4);
-     }
-    }
-    if(ok)emit(results,task*ny+yy-p.yoff);
+    uint r0=rotation_y(xz0,y);
+    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,y,z,r0);
    }
   }else{
    uint index=task;if(index>=p.count)break;
@@ -184,7 +108,8 @@ kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [
    int y=int(int64_t(p.ymin)+int64_t(id%p.ny));id/=p.ny;
    int z=int(int64_t(p.zmin)+int64_t(id%p.nz));id/=p.nz;
    int x=int(int64_t(p.xmin)+int64_t(id));
-   if(matched(blocks,p.nb,x,y,z))emit(results,index);
+   uint r0=rotation(x,y,z);
+   check_anchor(blocks,results,p,index,x,y,z,r0);
   }
  }
 })MSL";
@@ -225,7 +150,7 @@ static double dispatch(id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
 static std::vector<uint32_t> resultIds(id<MTLBuffer>bf,uint32_t count){
  auto*r=static_cast<uint32_t*>(bf.contents);if(r[0]>count)throw std::runtime_error("GPU result capacity exceeded");
  std::vector<uint32_t>ids(r+1,r+1+r[0]);std::sort(ids.begin(),ids.end());
- for(size_t i=0;i<ids.size();i++)if(ids[i]>=count||(i&&ids[i]==ids[i-1]))throw std::runtime_error("Invalid/duplicate GPU result index");
+ for(size_t i=0;i<ids.size();i++)if((ids[i]>>2)>=count||(i&&ids[i]==ids[i-1]))throw std::runtime_error("Invalid/duplicate GPU result index");
  return ids;
 }
 static NSString* cachePath(){
@@ -233,7 +158,8 @@ static NSString* cachePath(){
  return [[NSSearchPathForDirectoriesInDomains(NSCachesDirectory,NSUserDomainMask,YES) firstObject] stringByAppendingPathComponent:@"grass-solver/metal-autotune-v2.plist"];
 }
 static Tune autotune(id<MTLDevice>device,id<MTLCommandQueue>queue,id<MTLComputePipelineState>pipe,
- id<MTLBuffer>bb,id<MTLBuffer>bf,const std::vector<Block>&blocks,const Options&o,const std::string&mode,NSString*path){
+ id<MTLBuffer>bb,id<MTLBuffer>bf,const std::vector<Block>&blocks,const Options&o,const std::string&mode,NSString*path,
+ uint32_t active_norths,int32_t anchor_r,int32_t anchor_side,uint32_t nb){
  Tune fallback{uint32_t(std::min<NSUInteger>(128,pipe.maxTotalThreadsPerThreadgroup)),1};
  if(mode=="off"){std::cerr<<"autotune off width "<<fallback.width<<" items 1\n";return fallback;}
  // Exact observations and search shape matter: early rejection and integer division
@@ -242,6 +168,9 @@ static Tune autotune(id<MTLDevice>device,id<MTLCommandQueue>queue,id<MTLComputeP
  uint64_t h=hashBytes(14695981039346656037ULL,source,std::strlen(source));
  h=hashBytes(h,blocks.data(),blocks.size()*sizeof(Block));
  h=hashBytes(h,o.dim,sizeof(o.dim));h=hashBytes(h,o.lo,sizeof(o.lo));bool wide=std::getenv("GRASS_METAL_FORCE_WIDE")!=nullptr;h=hashBytes(h,&wide,sizeof(wide));
+ h=hashBytes(h,&active_norths,sizeof(active_norths));
+ h=hashBytes(h,&anchor_r,sizeof(anchor_r));
+ h=hashBytes(h,&anchor_side,sizeof(anchor_side));
  NSString*key=[NSString stringWithFormat:@"columns-v3|%@|%@|%@|%lu|%lu|%016llx",device.name,device.architecture.name,
  NSProcessInfo.processInfo.operatingSystemVersionString,(unsigned long)pipe.threadExecutionWidth,
  (unsigned long)pipe.maxTotalThreadsPerThreadgroup,(unsigned long long)h];
@@ -262,7 +191,7 @@ static Tune autotune(id<MTLDevice>device,id<MTLCommandQueue>queue,id<MTLComputeP
  uint32_t count=uint32_t(std::min<uint64_t>(262144,o.total));
  std::vector<uint64_t>bases{0};if(o.total>count){bases.push_back((o.total-count)/2);bases.push_back(o.total-count);}
  std::vector<std::vector<uint32_t>>expected;
- auto params=[&](uint64_t base){return Params{base,o.dim[1],o.dim[2],count,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],1,count,0,0,0,0};};
+ auto params=[&](uint64_t base){return Params{base,o.dim[1],o.dim[2],count,nb,o.lo[0],o.lo[1],o.lo[2],1,count,0,0,0,0,active_norths,anchor_r,anchor_side};};
  for(auto base:bases){dispatch(queue,pipe,bb,bf,params(base),fallback);expected.push_back(resultIds(bf,count));}
  Tune best=fallback;double bestTime=std::numeric_limits<double>::max();int tested=0;
  std::vector<Tune>variants;
@@ -323,49 +252,102 @@ int main(int argc,char**argv){@autoreleasepool{try{
   [device newBufferWithLength:(size_t(batch)+1)*4 options:MTLResourceStorageModeShared]
  };
  if(!queue||!bf[0]||!bf[1])throw std::runtime_error("Metal allocation failed");
+
+ size_t anchor_idx=0;
+ for(size_t i=0;i<original.size();i++){
+  if(original[i].side==0){anchor_idx=i;break;}
+ }
+ int32_t xA=original[anchor_idx].x;
+ int32_t yA=original[anchor_idx].y;
+ int32_t zA=original[anchor_idx].z;
+ int32_t rA=original[anchor_idx].r;
+ int32_t sideA=original[anchor_idx].side;
+ if(anchor_idx!=0)std::swap(original[0],original[anchor_idx]);
+ for(auto&b:original){b.x-=xA;b.y-=yA;b.z-=zA;}
+
+ int32_t xA_n[4],zA_n[4];
+ for(int n=0;n<4;n++){
+  int64_t x=xA,z=zA;
+  for(int j=0;j<n;j++){int64_t old=x;x=-z;z=old;}
+  xA_n[n]=coord(x);zA_n[n]=coord(z);
+ }
+
+ uint32_t active_norths=0;
+ for(int n:o.north)active_norths|=(1u<<n);
+
+ uint32_t nb=uint32_t(original.size());
+ std::vector<Block>all_blocks(4*nb);
+ for(int n=0;n<4;n++){
+  std::vector<Block> oriented=original;
+  for(auto&v:oriented){
+   int64_t x=v.x,z=v.z;
+   for(int j=0;j<n;j++){int64_t old=x;x=-z;z=old;}
+   v.x=coord(x);v.z=coord(z);
+   v.r=(v.r+n)&3;
+   if(v.side)v.r&=1;
+  }
+  if(oriented.size()>1){
+   std::stable_sort(oriented.begin()+1,oriented.end(),[](const Block&a,const Block&b){return a.side<b.side;});
+  }
+  std::copy(oriented.begin(),oriented.end(),all_blocks.begin()+n*nb);
+ }
+
+ id<MTLBuffer>bb=[device newBufferWithBytes:all_blocks.data() length:all_blocks.size()*sizeof(Block) options:MTLResourceStorageModeShared];
+ if(!bb)throw std::runtime_error("Metal block allocation failed");
+
+ Tune tune=autotune(device,queue,pipe,bb,bf[0],all_blocks,o,mode,path,active_norths,rA,sideA,nb);
+
  double searchSeconds=0;uint64_t done=0,matches=0;auto start=std::chrono::steady_clock::now();auto last=start;
  std::signal(SIGINT,stop_search);std::signal(SIGTERM,stop_search);
- for(int north:o.north){
-  auto blocks=orient(original,north,o);
-  std::stable_sort(blocks.begin(),blocks.end(),[](const Block&a,const Block&b){return a.side<b.side;});
-  id<MTLBuffer>bb=[device newBufferWithBytes:blocks.data() length:blocks.size()*sizeof(Block) options:MTLResourceStorageModeShared];if(!bb)throw std::runtime_error("Metal block allocation failed");
-  Tune tune=autotune(device,queue,pipe,bb,bf[0],blocks,o,mode,path);
-  auto searchStart=std::chrono::steady_clock::now();
-  uint64_t base=0;uint32_t bufIdx=0;
-  id<MTLCommandBuffer>inflightCmd=nil;
-  uint32_t inflightBuf=0;uint64_t inflightBase=0;uint32_t inflightCount=0;
-  if(base<o.total&&!stopped){
-   inflightCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
-   Params p{base,o.dim[1],o.dim[2],inflightCount,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0};
-   inflightCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
-   inflightBuf=bufIdx;inflightBase=base;
-   base+=inflightCount;bufIdx^=1;
-  }
-  while(inflightCmd!=nil){
-   id<MTLCommandBuffer>nextCmd=nil;
-   uint32_t nextBuf=0;uint64_t nextBase=0;uint32_t nextCount=0;
-   if(base<o.total&&!stopped){
-    nextCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
-    Params p{base,o.dim[1],o.dim[2],nextCount,uint32_t(blocks.size()),o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0};
-    nextCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
-    nextBuf=bufIdx;nextBase=base;
-    base+=nextCount;bufIdx^=1;
-   }
-   [inflightCmd waitUntilCompleted];
-   if(inflightCmd.status!=MTLCommandBufferStatusCompleted)
-    throw std::runtime_error(inflightCmd.error?[[inflightCmd.error localizedDescription] UTF8String]:"Metal dispatch failed");
-   auto ids=resultIds(bf[inflightBuf],inflightCount);
-   for(uint32_t i:ids){int32_t x,y,z;decode(inflightBase+i,o,x,y,z);std::cout<<x<<" "<<y<<" "<<z<<" "<<north<<"\n";matches++;}
-   if(!std::cout)throw std::runtime_error("Output write failed");
-   done+=inflightCount;
-   auto now=std::chrono::steady_clock::now();
-   if(std::chrono::duration<double>(now-last).count()>=1){double sec=std::chrono::duration<double>(now-start).count();std::cerr<<"progress "<<done<<"/"<<o.total*o.north.size()<<" rate "<<double(done)/sec<<" candidates/s matches "<<matches<<"\n";last=now;}
-   if(stopped){if(nextCmd)[nextCmd waitUntilCompleted];break;}
-   inflightCmd=nextCmd;inflightBuf=nextBuf;inflightBase=nextBase;inflightCount=nextCount;
-  }
-  searchSeconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-searchStart).count();
-  if(stopped)break;
+
+ auto searchStart=std::chrono::steady_clock::now();
+ uint64_t base=0;uint32_t bufIdx=0;
+ id<MTLCommandBuffer>inflightCmd=nil;
+ uint32_t inflightBuf=0;uint64_t inflightBase=0;uint32_t inflightCount=0;
+ if(base<o.total&&!stopped){
+  inflightCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
+  Params p{base,o.dim[1],o.dim[2],inflightCount,nb,o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0,active_norths,rA,sideA};
+  inflightCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
+  inflightBuf=bufIdx;inflightBase=base;
+  base+=inflightCount;bufIdx^=1;
  }
+ while(inflightCmd!=nil){
+  id<MTLCommandBuffer>nextCmd=nil;
+  uint32_t nextBuf=0;uint64_t nextBase=0;uint32_t nextCount=0;
+  if(base<o.total&&!stopped){
+   nextCount=uint32_t(std::min<uint64_t>(batch,o.total-base));
+   Params p{base,o.dim[1],o.dim[2],nextCount,nb,o.lo[0],o.lo[1],o.lo[2],tune.items,0,0,0,0,0,active_norths,rA,sideA};
+   nextCmd=launch(queue,pipe,bb,bf[bufIdx],p,tune);
+   nextBuf=bufIdx;nextBase=base;
+   base+=nextCount;bufIdx^=1;
+  }
+  [inflightCmd waitUntilCompleted];
+  if(inflightCmd.status!=MTLCommandBufferStatusCompleted)
+   throw std::runtime_error(inflightCmd.error?[[inflightCmd.error localizedDescription] UTF8String]:"Metal dispatch failed");
+  auto ids=resultIds(bf[inflightBuf],inflightCount);
+  for(uint32_t val:ids){
+   uint32_t i=val>>2;
+   uint32_t north=val&3;
+   int32_t X,Y,Z;
+   decode(inflightBase+i,o,X,Y,Z);
+   int32_t origX=coord(int64_t(X)-xA_n[north]);
+   int32_t origY=coord(int64_t(Y)-yA);
+   int32_t origZ=coord(int64_t(Z)-zA_n[north]);
+   std::cout<<origX<<" "<<origY<<" "<<origZ<<" "<<north<<"\n";
+   matches++;
+  }
+  if(!std::cout)throw std::runtime_error("Output write failed");
+  done+=inflightCount;
+  auto now=std::chrono::steady_clock::now();
+  if(std::chrono::duration<double>(now-last).count()>=1){
+   double sec=std::chrono::duration<double>(now-start).count();
+   std::cerr<<"progress "<<done<<"/"<<o.total<<" rate "<<double(done)/sec<<" candidates/s matches "<<matches<<"\n";
+   last=now;
+  }
+  if(stopped){if(nextCmd)[nextCmd waitUntilCompleted];break;}
+  inflightCmd=nextCmd;inflightBuf=nextBuf;inflightBase=nextBase;inflightCount=nextCount;
+ }
+ searchSeconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-searchStart).count();
  double sec=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
  std::cout.flush();
  std::cerr<<"search_loop seconds "<<searchSeconds<<" rate "<<double(done)/std::max(searchSeconds,1e-9)<<" candidates/s tuning_excluded 1\n";
