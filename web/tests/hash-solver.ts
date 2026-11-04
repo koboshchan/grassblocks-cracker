@@ -15,7 +15,7 @@ for(let i=0;i<100000;i++){
  if(got.join()!==want.join())throw Error('SIMD mismatch '+i);
  }
 }
-const lines=readFileSync(new URL('./hill.txt',import.meta.url),'utf8').trim().split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
+const lines=readFileSync(new URL('./fixtures/hill22.txt',import.meta.url),'utf8').trim().split('\n').filter(l=>l.trim()&&!l.startsWith('#'));
 const blocks=lines.slice(1).map(l=>{const[x,y,z,rotation,is_side]=l.trim().split(/\s+/).map(Number);return{x,y,z,rotation,is_side};});
 for(const b of blocks)if(rotationBigInt(3538+b.x,90+b.y,-454+b.z,b.is_side)!==b.rotation)throw Error('Hill observation disagrees');
 let found=[];

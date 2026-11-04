@@ -14,7 +14,7 @@ Build on Linux with a CUDA toolkit and supported C++ compiler using nvcc -std=c+
 
 Build on Windows from the x64 Native Tools Command Prompt with nvcc -std=c++17 -O2 -arch=sm_89 grass_solver.cu -o grass_solver.exe. Use a Visual Studio release supported by your installed CUDA toolkit. This desktop has CUDA 12.1 and VS 2026, so the actual successful test build required -allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH. Those overrides are an observed local compatibility workaround, not a general compatibility guarantee.
 
-Run ./grass_solver --formation hill22.txt --north all 3535 3541 88 92 -457 -451. On Windows use grass_solver.exe instead. Expected sole output is 3538 90 -454 0.
+Run ./grass_solver --formation fixtures/hill22.txt --north all 3535 3541 88 92 -457 -451. On Windows use grass_solver.exe instead. Expected sole output is 3538 90 -454 0.
 
 Run python3 test_solver.py ./grass_solver, or python test_solver.py grass_solver.exe on Windows. Tests compare exact candidate sets with an independent arbitrary-precision Python oracle, including negative and large wrapped coordinates, mixed heights, side textures, every north, 5043 dense results and malformed/overflow inputs. Only tiny GPU workloads are used.
 

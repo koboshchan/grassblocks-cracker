@@ -12,7 +12,7 @@ Each origin uses the modern vanilla Java block-coordinate hash: signed int32 x*3
 
 Build on macOS with Xcode command-line tools using clang++ -std=c++17 -O3 -fobjc-arc grass_solver.mm -framework Foundation -framework Metal -o grass_solver.
 
-Run ./grass_solver --formation hill22.txt --north all 3535 3541 88 92 -457 -451. Expected sole output is 3538 90 -454 0.
+Run ./grass_solver --formation fixtures/hill22.txt --north all 3535 3541 88 92 -457 -451. Expected sole output is 3538 90 -454 0.
 
 Run python3 test_solver.py ./grass_solver. Tests compare exact candidate sets with an independent arbitrary-precision Python oracle, including negative and large wrapped coordinates, mixed heights, side textures, every north, 5043 dense results and malformed/overflow inputs. Only tiny GPU workloads are used.
 
@@ -34,7 +34,7 @@ The final kernel uses xz-column tasks with inner y loops for dimensions y<=4096 
 
 Final actual hardware benchmark, November 1, 2026
 
-Every run searched hill22.txt at one north with inclusive bounds -5000 5000 60 128 -5000 5000, exactly 6901380069 origins. Every mode completed with exit 0 and the sole result 3538 90 -454 0. Search-loop timing excludes autotune but includes command submission, GPU waits, sparse result processing and output. External wall timing starts before process launch and includes startup, runtime Metal compilation, tuning/cache work and process exit. These are single observed runs, not estimated hardware ratings or guaranteed speedups.
+Every run searched fixtures/hill22.txt at one north with inclusive bounds -5000 5000 60 128 -5000 5000, exactly 6901380069 origins. Every mode completed with exit 0 and the sole result 3538 90 -454 0. Search-loop timing excludes autotune but includes command submission, GPU waits, sparse result processing and output. External wall timing starts before process launch and includes startup, runtime Metal compilation, tuning/cache work and process exit. These are single observed runs, not estimated hardware ratings or guaranteed speedups.
 
 Apple M1 force measured 1.84324 billion origins/s, search 3.74415 seconds, external wall 3.88693025 seconds including 0.108505 seconds of tuning. Cache mode measured 1.87812 billion/s, search 3.67462 seconds, wall 3.752030334 seconds. Off mode measured 1.84062 billion/s, search 3.74949 seconds, wall 3.821352458 seconds.
 

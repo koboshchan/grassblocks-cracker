@@ -2,7 +2,7 @@ import json, pathlib, re, signal, subprocess, time
 root=pathlib.Path(__file__).resolve().parent
 records=[]
 for mode in ("force","auto","off"):
-    args=[str(root/"grass_solver"),"--formation",str(root/"hill22.txt"),"--autotune",mode,
+    args=[str(root/"grass_solver"),"--formation",str(root/"fixtures"/"hill22.txt"),"--autotune",mode,
           "--autotune-cache",str(root/"benchmark-autotune.plist"),"-5000","5000","60","128","-5000","5000"]
     start=time.perf_counter()
     process=subprocess.Popen(args,cwd=root,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

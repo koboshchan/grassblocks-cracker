@@ -7,7 +7,7 @@ import sys
 import tempfile
 
 exe = str(pathlib.Path(sys.argv[1]).resolve())
-hill = pathlib.Path(__file__).with_name("hill22.txt")
+hill = pathlib.Path(__file__).with_name("fixtures")/"hill22.txt"
 bounds = ["3314", "3762", "88", "92", "-678", "-230"]  # 1,008,005, non-divisible tail
 with tempfile.TemporaryDirectory() as directory:
     cache = pathlib.Path(directory) / "nested" / "tune.plist"

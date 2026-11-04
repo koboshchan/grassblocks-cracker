@@ -49,6 +49,6 @@ if (r.blocks.length > 0) {
     lines.push(`${b.x} ${b.y} ${b.z} ${b.rotation} 0`);
   }
   const metalDir = process.env.METAL_DIR || new URL('../../metal/', import.meta.url).pathname;
-  fs.writeFileSync(`${metalDir}formation_att_${idx}.txt`, lines.join('\n') + '\n');
-  console.log(`Saved metal/formation_att_${idx}.txt with ${r.blocks.length} blocks.`);
+  fs.writeFileSync(`/tmp/formation_att_${idx}.txt`, lines.join('\n') + '\n');
+  console.log(`Saved /tmp/formation_att_${idx}.txt with ${r.blocks.length} blocks.`);
 }

@@ -30,3 +30,7 @@ web/tests/*-result.json
 web/tests/*-WebGPU.json
 web/tests/APPLE-UI-QA.json
 bench-*/
+
+# Generated formation outputs (fixtures live in */fixtures/)
+formation*.txt
+!**/fixtures/*.txt

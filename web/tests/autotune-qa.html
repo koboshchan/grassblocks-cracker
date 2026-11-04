@@ -9,7 +9,7 @@ try {
  let hashSha=[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(code)))].map(x=>x.toString(16).padStart(2,'0')).join('');
  let key='grass-wgsl-tune-v2:'+JSON.stringify(info)+':'+hash;
  result.adapter=info;result.sha256=hashSha;
- const text=await(await fetch('./hill.txt',{cache:'no-store'})).text();
+ const text=await(await fetch('./fixtures/hill22.txt',{cache:'no-store'})).text();
  let blocks=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#')).slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side}});
  const full=location.search.includes('quick')?{xmin:-1000,xmax:1000,zmin:-1000,zmax:1000,ymin:-64,ymax:319,north:[0]}:{xmin:-5000,xmax:5000,zmin:-5000,zmax:5000,ymin:-64,ymax:319,north:[0,1,2,3]};
  localStorage.removeItem(key);

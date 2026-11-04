@@ -4,7 +4,7 @@ import {rotationBigInt} from '../hash.js';
 const out=document.querySelector('#out');
 const results={};
 try{
-const text=await (await fetch('./hill.txt')).text();const ls=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#'));const blocks=ls.slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side};});
+const text=await (await fetch('./fixtures/hill22.txt')).text();const ls=text.trim().split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#'));const blocks=ls.slice(1).map(l=>{const [x,y,z,rotation,is_side]=l.split(/\s+/).map(Number);return{x,y,z,rotation,is_side};});
 for(const b of blocks)if(rotationBigInt(3538+b.x,90+b.y,-454+b.z,b.is_side)!==b.rotation)throw Error('Hill fixture mismatch');
 const solver=await createSolver({backend:'gpu'});results.adapter=solver.adapterInfo;
 results.small=await solver.search(blocks,{xmin:3500,xmax:3580,zmin:-490,zmax:-420,ymin:70,ymax:110,north:[0,1,2,3]});
