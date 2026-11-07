@@ -5,8 +5,8 @@ Two complete runs produced identical tile counts. Times below are from the secon
 | Image | Existing tiles / seconds | Grid-only tiles / seconds | Hybrid tiles / total seconds |
 | --- | --- | --- | --- |
 | Hill | 22 / 13.25 | 0 / 4.02 | 5 / 18.76 |
-| Birch | 78 / 45.47 | 33 / 4.44 | 23 / 50.80 |
-| Overhead | 15 / 19.17 | 46 / 3.86 | 36 / 23.23 |
+| Birch | 78 / 45.47 | 33 / 4.44 | 23 / 50.79 |
+| Overhead | 15 / 19.17 | 46 / 3.86 | 36 / 23.24 |
 | New plains | 2 / 5.42 | 0 / 3.40 | 2 / 10.06 |
 
 Hybrid total includes the entire baseline detection plus the extra Python stage, not just the additional work.
