@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 import cv2 as cv
 import numpy as np
-from robust_detect.detector import Classifier, UNIT, plane_groups
+from robust_detect.detector import Classifier, UNIT, plane_groups, line_vps
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,6 +44,27 @@ class DetectorTests(unittest.TestCase):
 
     def test_foreshortened_rejected(self):
         self.assertIsNone(self.c.classify(self.tile(0), UNIT * [128, 6] + 8))
+
+    def test_blank_image_has_no_vanishing_points(self):
+        points, meta = line_vps(np.zeros((240, 320, 3), np.uint8))
+        self.assertEqual(points, [])
+        self.assertEqual(meta['lines'], 0)
+
+    def test_clipped_tile_rejected(self):
+        self.assertIsNone(self.c.classify(self.tile(0), self.quad + [30, 0]))
+
+    def test_tinted_blur_still_classifies(self):
+        for k in range(4):
+            im = cv.GaussianBlur(self.tile(k), (5, 5), 1.)
+            result = self.c.classify(im, self.quad)
+            self.assertIsNotNone(result)
+            self.assertEqual(result['rotation'], k)
+
+    def test_noise_does_not_hallucinate_tiles(self):
+        rng = np.random.default_rng(22)
+        for _ in range(12):
+            noise = rng.integers(0, 256, (146, 146, 3), dtype=np.uint8)
+            self.assertIsNone(self.c.classify(noise, self.quad))
 
     def test_height_groups_not_merged(self):
         # Three coplanar tiles plus another plane displaced by noninteger image offset.

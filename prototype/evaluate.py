@@ -71,6 +71,7 @@ def main():
     ap.add_argument('--runs', type=Path, required=True)
     ap.add_argument('--hill-fixture', type=Path, required=True)
     ap.add_argument('--birch-fixture', type=Path, required=True)
+    ap.add_argument('--overhead-reference', type=Path, help='Independent classifier output, NOT world ground truth')
     args = ap.parse_args()
     cases = dict(hill=(json.loads(args.hill_fixture.read_text())['blocks'], (3538,90,-454),0),
                  birch=(json.loads(args.birch_fixture.read_text())['blocks'], (-4133,63,-2049),3))
@@ -80,6 +81,14 @@ def main():
         for name in ['hill','birch','overhead','plains']:
             r = json.loads((args.runs/mode/name/'result.json').read_text())
             metrics = evaluation(r, *cases[name]) if name in cases else dict(tiles=len(r['blocks']))
+            if name == 'overhead' and args.overhead_reference:
+                reference = json.loads(args.overhead_reference.read_text())['blocks']
+                overlaps = [(b, paired(b, reference)) for b in r['blocks']]
+                overlaps = [(b, p) for b, p in overlaps if p]
+                metrics['independent_overlap'] = len(overlaps)
+                metrics['independent_rotation_agreement'] = sum(
+                    b['rotation'] == (p[1]['rotation']-p[2]) % 4 for b, p in overlaps)
+                metrics['note'] = 'Classifier agreement only; no overhead ground truth or known location'
             metrics['seconds'] = r['seconds']
             report[mode][name] = metrics
     (args.runs/'evaluation.json').write_text(json.dumps(report,indent=2))

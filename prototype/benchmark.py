@@ -25,6 +25,7 @@ def main():
     ap = argparse.ArgumentParser(__doc__)
     for arg in ['birch', 'overhead', 'plains', 'assets', 'birch-fixture', 'out']:
         ap.add_argument('--'+arg, type=Path, required=True)
+    ap.add_argument('--overhead-reference', type=Path)
     ap.add_argument('--node', default='node')
     ap.add_argument('--esbuild', type=Path, required=True)
     args = ap.parse_args()
@@ -36,7 +37,7 @@ def main():
                          ('dist/vendor/grass-sift.js','grass-sift.cjs'),
                          ('dist/vendor/grass-sift.wasm','grass-sift.wasm')]:
         shutil.copy2(args.assets/source, vendor/dest)
-    run([args.node, args.esbuild, ROOT/'prototype/baseline.ts', '--bundle',
+    run([args.esbuild, ROOT/'prototype/baseline.ts', '--bundle',
          '--platform=node', '--format=esm', '--outfile='+str(args.out/'baseline.mjs')])
     images = dict(hill=ROOT/'web/public/examples/hill.png', birch=args.birch.resolve(),
                   overhead=args.overhead.resolve(), plains=args.plains.resolve())
@@ -67,9 +68,12 @@ def main():
             if mode == 'hybrid':
                 cmd += ['--hybrid-seeds',args.out/'baseline'/name/'result.json']
             run(cmd,dest/'log.txt',env={**os.environ,'PYTHONPATH':str(ROOT/'prototype')})
-    run([sys.executable,ROOT/'prototype/evaluate.py','--runs',args.out,
-         '--hill-fixture',ROOT/'web/public/examples/hill.json',
-         '--birch-fixture',args.birch_fixture])
+    eval_args = [sys.executable,ROOT/'prototype/evaluate.py','--runs',args.out,
+                 '--hill-fixture',ROOT/'web/public/examples/hill.json',
+                 '--birch-fixture',args.birch_fixture]
+    if args.overhead_reference:
+        eval_args += ['--overhead-reference',args.overhead_reference.resolve()]
+    run(eval_args)
     run([args.node,ROOT/'prototype/solver-regression.cjs',args.out,
          args.assets/'artifacts/solver.wasm'])
 
