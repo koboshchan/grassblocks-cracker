@@ -123,7 +123,9 @@ def line_vps(image, max_lines=300):
             break
         pairs = rng.choice(idx, (1200, 2))
         vp = np.cross(lines[pairs[:, 0]], lines[pairs[:, 1]])
-        vp /= np.maximum(np.linalg.norm(vp, axis=1)[:, None], 1e-12)
+        norms = np.linalg.norm(vp, axis=1)
+        vp = vp[norms > 1e-8]
+        vp /= np.linalg.norm(vp, axis=1)[:, None]
         # distance to the infinite line, divided by midpoint-to-VP ray length.
         dist = np.abs(lines @ vp.T)
         ray = vp[None, :, :2] - mid[:, None, :2] * vp[None, :, 2:3]
@@ -158,8 +160,7 @@ def rectifications(image):
         va, vb = a.copy(), b.copy()
         da = va[:2] - origin[:2] * va[2]
         db = vb[:2] - origin[:2] * vb[2]
-        if abs(np.cross(da / max(np.linalg.norm(da), 1e-9),
-                        db / max(np.linalg.norm(db), 1e-9))) < .10:
+        if abs((da[0]*db[1] - da[1]*db[0]) / max(np.linalg.norm(da)*np.linalg.norm(db), 1e-9)) < .10:
             continue
         if abs(da[0]) < abs(db[0]):
             va, vb, da, db = vb, va, db, da
