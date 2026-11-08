@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {webcrypto} from 'node:crypto';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { runInNewContext } from 'node:vm';
@@ -44,7 +45,7 @@ async function workerHarness(gpu = true) {
     _grass_result() { return 0; }, UTF8ToString() { return nativeResult; },
   };
   const scope: any = {
-    navigator: gpu ? { gpu: {} } : {}, URL, performance, console,
+    navigator: gpu ? { gpu: {} } : {}, URL, performance, console, crypto:webcrypto,
     Uint8Array, Float64Array, ArrayBuffer,
     fetch: async () => ({ ok: true, text: async () => 'shader' }),
     createGpu: async () => ({checked: (work: any) => work(),adapterInfo:{description:'test'},diagnostics:{}}),
@@ -186,4 +187,12 @@ test('default ready label and synchronous native stage progress reflect WASM eve
   assert.equal(progress[3].fraction,1/9);
   assert.equal(progress[3].indeterminate,false);
   assert.ok(h.messages.findIndex(m=>m===progress[3])<h.messages.findIndex(m=>m.type==='result'));
+});
+
+test('diagnostic identity is per detection, includes exact decoded hash and dimensions',async()=>{
+ const h=await workerHarness();const r=await h.detect();
+ const d=r.diagnostics.inputIdentity;
+ assert.equal(d.pixelSha256,'5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef');
+ assert.equal(d.decodedWidth,16);assert.equal(d.effectiveDetectHeight,16);assert.equal(d.resize,'none');
+ assert.equal(r.diagnostics.classified,0);
 });

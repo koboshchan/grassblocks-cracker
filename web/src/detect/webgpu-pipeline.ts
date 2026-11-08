@@ -1049,7 +1049,7 @@ export async function runWebGpuDetection(detector:WebGpuDetector,img:{width:numb
   progress(`GPU trial ${trials.length+1}/${configs.length} ${name}`);
   const result=await runSingleGpuDetection(detector,img,ref,trialOpts,text=>progress(`${name}: ${text}`));
   if(!first){first=result;merged=result.blocks;}else merged=mergeGpuAligned(merged,result.blocks);
-  trials.push({name,tiles:result.blocks.length,seeds:result.seeds.length,mergedTiles:merged.length,seconds:result.seconds});
+  trials.push({name,tiles:result.blocks.length,seeds:result.seeds.length,mergedTiles:merged.length,seconds:result.seconds,settings:config,orderedBlocks:result.blocks,verifiedSeeds:result.seeds});
  }
  return {...first!,blocks:merged,camera:automatic?null:first!.camera,planeH:automatic?null:first!.planeH,seconds:(performance.now()-started)/1000,trials};
 }
