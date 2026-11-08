@@ -11,5 +11,8 @@ test('native pipeline validates/marshals only and exposes timing results',()=>{
  detect(pixels,16,16,ref,{accept:.84});assert.equal(calls[2].at(-1),0);
  classifyQuad(pixels,16,16,ref,q);assert.equal(freed.length,15);
  assert.throws(()=>detect(pixels,16,16,[]),/reference/);assert.throws(()=>detect(pixels,16,16,ref,{unknown:1}),/Unsupported/);assert.throws(()=>classifyQuad(pixels,16,16,ref,[[1,Infinity],[2,2],[3,3],[4,4]]),/Nonfinite/);
+ detect(pixels,16,16,ref,{refineMin:-1,refineMargin:-.5,refineVotes:3.5});
+ const optionsPtr=calls.at(-1)[4]/8;assert.equal(fake.HEAPF64[optionsPtr+4],-1);assert.equal(fake.HEAPF64[optionsPtr+5],-.5);assert.equal(fake.HEAPF64[optionsPtr+8],3.5);assert.equal(fake.HEAPF64[optionsPtr+11],3);
+ detect(pixels,16,16,ref);assert.equal(fake.HEAPF64[calls.at(-1)[4]/8+11],0);
  error=true;assert.throws(()=>detect(pixels,16,16,ref),/native failure/);
 });
