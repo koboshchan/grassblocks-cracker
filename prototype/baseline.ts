@@ -18,7 +18,7 @@ console.log('sift ready');
 await wasm.init(fs.readFileSync(artifact));
 wasm.setImage(g,f.w,f.h);wasm.setRefs(Uint8Array.from(makeRefs(f.ref).flat()));
 const t=performance.now();
-const result=runDetection(cv,{width:f.w,height:f.h,data:rgba},f.ref,{},console.log,
+const result=runDetection(cv,{width:f.w,height:f.h,data:rgba},f.ref,JSON.parse(process.env.DETECT_OPTIONS || "{}"),console.log,
  {classifyBatch:wasm.classifyBatch,featureSeeds:(cv,ctx,log)=>siftSeeds(sift,cv,ctx,log)});
 fs.writeFileSync(out,JSON.stringify({...result,seconds:(performance.now()-t)/1000}));
 console.log(JSON.stringify({out,seconds:(performance.now()-t)/1000,blocks:result.blocks.length}));
