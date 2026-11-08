@@ -150,7 +150,7 @@ self.onmessage = async (ev: MessageEvent) => {
           } }, progress
         ));
         if (!result || !Array.isArray(result.blocks)) throw Error('Invalid WebGPU result');
-        post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics, featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
+        post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics,eccBatchPolicy:webgpuDetector.eccBatchPolicy,eccBatchTimings:webgpuDetector.eccBatchTimings, timingNote:"host wall measurements overlap; GPU timestamp unavailable", featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
         return;
       } catch (e:any) { throw e; }
     }

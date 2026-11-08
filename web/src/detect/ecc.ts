@@ -1,9 +1,13 @@
+import {eccBatchCapacity,ECC_SCRATCH_BUDGET,ECC_QUAD_BYTES} from './ecc-batch';
 import {eccShader} from './ecc-shader';
 const entries=['prepare','gaussian','gradients','warp_pixels','statistics','jacobian','normal_equations','update'] as const;
+export interface EccHostTiming {count:number;passes:number;submissions:number;readbacks:number;encodeMs:number;submitToReadbackMs:number;wallMs:number;scratchBytes:number;gpuTimestampMs:null}
 export interface EccTrace {base:number[];warp:number[];composed:number[];rho:number;iterations:number;status:number;rotation:number;quad:number[][];lastRho:number;rhoChange:number;converged:boolean;iterationLimitReached:boolean;termination:string;maskCount:number;firstMaskCount:number;minMaskCount:number;maxMaskCount:number}
 /** No native calls. JS handles allocations and matrix input/output transport only. */
 export class BatchedGpuEcc {
- private constructor(private device:GPUDevice,private pipelines:GPUComputePipeline[]){}
+ readonly capacity:number;
+ lastHostTiming:EccHostTiming|null=null;
+ private constructor(private device:GPUDevice,private pipelines:GPUComputePipeline[]){this.capacity=eccBatchCapacity(device.limits);if(this.capacity<1)throw Error("ECC device limits exceed conservative scratch budget");}
  static async create(device:GPUDevice){
   const shader=device.createShaderModule({code:eccShader});const info=await shader.getCompilationInfo();
   const errors=info.messages.filter(m=>m.type==='error');if(errors.length)throw Error(errors.map(m=>`${m.lineNum} ${m.message}`).join('\n'));
@@ -16,8 +20,9 @@ export class BatchedGpuEcc {
   return new BatchedGpuEcc(device,pipelines);
  }
  async run(image:GPUTextureView,refs:GPUBuffer,width:number,height:number,quads:number[][][],rotations:number[],diagnosticInitialWarp?:number[]):Promise<EccTrace[]>{
-  if(quads.length>16||quads.length!==rotations.length||quads.some(q=>q.length!==4||q.some(p=>p.length!==2||p.some(v=>!Number.isFinite(v))))||rotations.some(r=>!Number.isInteger(r)||r<0||r>3))throw Error('ECC component bounds/inputs');
+  if(quads.length>this.capacity||quads.length!==rotations.length||quads.some(q=>q.length!==4||q.some(p=>p.length!==2||p.some(v=>!Number.isFinite(v))))||rotations.some(r=>!Number.isInteger(r)||r<0||r>3))throw Error('ECC component bounds/inputs');
   if(diagnosticInitialWarp&&(diagnosticInitialWarp.length!==9||diagnosticInitialWarp.some(v=>!Number.isFinite(v))||diagnosticInitialWarp[8]!==1))throw Error('Diagnostic initial warp invalid');
+  const wallStart=performance.now();
   const count=quads.length;if(!count)return [];
   const initial=new Float32Array(count*28);
   quads.forEach((q,i)=>{const base=quadBase(q);const s=i*28;initial.set(base,s);initial.set(diagnosticInitialWarp??[1,0,0,0,1,0,0,0,1],s+9);initial[s+18]=-1;initial[s+19]=-.00001;initial[s+20]=base.every(Number.isFinite)?0:-2;initial[s+22]=rotations[i];});
@@ -29,10 +34,12 @@ export class BatchedGpuEcc {
   const read=buffer(initial.byteLength+count*86*4,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);let mapped=false;
   try{
    const bind=this.device.createBindGroup({layout:this.pipelines[0].getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:params}},{binding:1,resource:image},{binding:2,resource:{buffer:refs}},...[states,patch,pixels,jac,sums].map((b,i)=>({binding:i+3,resource:{buffer:b}}))]});
+   const encodeStart=performance.now();
    const encoder=this.device.createCommandEncoder();const pass=(index:number,x:number,y=1)=>{const c=encoder.beginComputePass();c.setPipeline(this.pipelines[index]);c.setBindGroup(0,bind);c.dispatchWorkgroups(x,y);c.end();};
    pass(0,256,count);pass(1,256,count);pass(2,256,count);
    for(let iteration=0;iteration<60;iteration++){pass(3,256,count);pass(4,count,6);pass(5,256,count);pass(6,count,80);pass(7,count);}
-   encoder.copyBufferToBuffer(states,0,read,0,initial.byteLength);encoder.copyBufferToBuffer(sums,0,read,initial.byteLength,count*86*4);this.device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);mapped=true;
+   encoder.copyBufferToBuffer(states,0,read,0,initial.byteLength);encoder.copyBufferToBuffer(sums,0,read,initial.byteLength,count*86*4);const command=encoder.finish(),encoded=performance.now();this.device.queue.submit([command]);await read.mapAsync(GPUMapMode.READ);mapped=true;
+   this.lastHostTiming={count,passes:303,submissions:1,readbacks:1,encodeMs:encoded-encodeStart,submitToReadbackMs:performance.now()-encoded,wallMs:performance.now()-wallStart,scratchBytes:count*Object.values(ECC_QUAD_BYTES).reduce((a,b)=>a+b,0)+16,gpuTimestampMs:null};
    const raw=new Float32Array(read.getMappedRange()).slice();
    return quads.map((q,i)=>{const s=i*28,base=Array.from(raw.slice(s,s+9)),warp=Array.from(raw.slice(s+9,s+18));const composed=multiply(base,warp);const candidate=[[0,0],[128,0],[128,128],[0,128]].map(([x,y])=>{const d=composed[6]*x+composed[7]*y+composed[8];return [(composed[0]*x+composed[1]*y+composed[2])/d,(composed[3]*x+composed[4]*y+composed[5])/d];});return {base,warp,composed,rho:raw[s+18],iterations:raw[s+21],status:raw[s+20],lastRho:raw[s+19],rhoChange:Math.abs(raw[s+18]-raw[s+19]),converged:raw[s+23]===1,iterationLimitReached:raw[s+23]===2,termination:raw[s+20]<0?'failure':raw[s+23]===1?'epsilon':raw[s+23]===2?'iteration-limit':'unfinished',maskCount:raw[s+25],firstMaskCount:raw[s+24],minMaskCount:raw[s+26],maxMaskCount:raw[s+27],rotation:rotations[i],quad:raw[s+20]>0?candidate:q};});
   }finally{if(mapped)read.unmap();owned.forEach(b=>b.destroy());}

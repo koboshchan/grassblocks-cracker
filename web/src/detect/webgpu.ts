@@ -391,6 +391,8 @@ export class WebGpuDetector {
     const info=(this.adapter as any).info;
     return info ? {vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description,isFallbackAdapter:(this.adapter as any).isFallbackAdapter} : {description:'adapter info unavailable'};
   }
+  eccBatchPolicy:Record<string,unknown>|null=null;
+  eccBatchTimings:import("./ecc").EccHostTiming[]=[];
   async refineBatch(quads: Float32Array, rotations?:number[]): Promise<Float32Array> {
     if (this.destroyed || !this.imageView || !this.refsBuffer) throw Error('ECC image/references unavailable');
     this.eccComponent ??= BatchedGpuEcc.create(this.device);
@@ -399,9 +401,12 @@ export class WebGpuDetector {
     if (!Number.isInteger(count)) throw Error('Invalid ECC quad buffer');
     if (!rotations) {const v=await this.classifyBatch(quads);rotations=Array.from({length:count},(_,i)=>Math.round(v[i*5+1]));}
     const output=new Float32Array(quads.length);const start=performance.now();
-    for(let base=0;base<count;base+=8){
-      const qs=Array.from({length:Math.min(8,count-base)},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+j)*8+k*2],quads[(base+j)*8+k*2+1]]));
+    const batchSize=component.capacity;
+    this.eccBatchPolicy={batchSize,scratchBudgetBytes:48*1024*1024,bytesPerQuad:1180560,limits:{maxStorageBufferBindingSize:this.device.limits.maxStorageBufferBindingSize,maxBufferSize:this.device.limits.maxBufferSize,maxComputeWorkgroupsPerDimension:this.device.limits.maxComputeWorkgroupsPerDimension}};
+    for(let base=0;base<count;base+=batchSize){
+      const qs=Array.from({length:Math.min(batchSize,count-base)},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+j)*8+k*2],quads[(base+j)*8+k*2+1]]));
       const traces=await component.run(this.imageView,this.refsBuffer,this.imageWidth,this.imageHeight,qs,rotations.slice(base,base+qs.length));
+      if(component.lastHostTiming)this.eccBatchTimings.push(component.lastHostTiming);
       traces.forEach((t,j)=>{output.set(t.quad.flat(),(base+j)*8);this.diagnostics.eccIterations+=t.iterations;this.diagnostics.eccConverged+=Number(t.converged);this.diagnostics.eccIterationLimits+=Number(t.iterationLimitReached);this.diagnostics.eccFailures+=Number(t.status<0);});
     }
     this.diagnostics.eccCandidates+=count;this.diagnostics.eccMs+=performance.now()-start;
