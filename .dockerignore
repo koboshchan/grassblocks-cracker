@@ -6,3 +6,7 @@ web/tests
 web/*.js
 **/*.log
 reference
+
+# Native detector assets are built in wasm-pipeline, never copied from host
+web/public/vendor/grass-pipeline.js
+web/public/vendor/grass-pipeline.wasm
