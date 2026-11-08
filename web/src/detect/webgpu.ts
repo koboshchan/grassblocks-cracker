@@ -1,3 +1,4 @@
+import {eccScratchBudget,withEccAllocationRetry} from './ecc-batch';
 import {BatchedGpuEcc} from './ecc';
 /**
  * WebGPU implementation of the dense patch detector kernel.
@@ -88,7 +89,9 @@ export class WebGpuDetector {
       if (!adapter) {
         return null;
       }
-      const device = await adapter.requestDevice();
+      const requiredLimits:Record<string,number>={};
+      for(const key of ['maxStorageBufferBindingSize','maxBufferSize','maxComputeWorkgroupsPerDimension'] as const){const value=adapter.limits?.[key];if(Number.isSafeInteger(value)&&value>0)requiredLimits[key]=value;}
+      const device = await adapter.requestDevice({requiredLimits});
 
       const shaderModule = device.createShaderModule({ code: shaderCode });
       const compilationInfo = await shaderModule.getCompilationInfo();
@@ -401,13 +404,17 @@ export class WebGpuDetector {
     if (!Number.isInteger(count)) throw Error('Invalid ECC quad buffer');
     if (!rotations) {const v=await this.classifyBatch(quads);rotations=Array.from({length:count},(_,i)=>Math.round(v[i*5+1]));}
     const output=new Float32Array(quads.length);const start=performance.now();
-    const batchSize=component.capacity;
-    this.eccBatchPolicy={batchSize,scratchBudgetBytes:48*1024*1024,bytesPerQuad:1180560,limits:{maxStorageBufferBindingSize:this.device.limits.maxStorageBufferBindingSize,maxBufferSize:this.device.limits.maxBufferSize,maxComputeWorkgroupsPerDimension:this.device.limits.maxComputeWorkgroupsPerDimension}};
-    for(let base=0;base<count;base+=batchSize){
-      const qs=Array.from({length:Math.min(batchSize,count-base)},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+j)*8+k*2],quads[(base+j)*8+k*2+1]]));
-      const traces=await component.run(this.imageView,this.refsBuffer,this.imageWidth,this.imageHeight,qs,rotations.slice(base,base+qs.length));
+    let batchSize=component.capacity;
+    const allocationFallbacks:{from:number;to:number}[]=[];
+    this.eccBatchPolicy={capacity:component.capacity,chosenBatchSize:Math.min(count,batchSize),scratchBudgetBytes:eccScratchBudget(this.device.limits),budgetFormula:'0.5 * min(device.maxStorageBufferBindingSize, device.maxBufferSize); not free VRAM',bytesPerQuad:1180560,allocationFallbacks,limits:{maxStorageBufferBindingSize:this.device.limits.maxStorageBufferBindingSize,maxBufferSize:this.device.limits.maxBufferSize,maxComputeWorkgroupsPerDimension:this.device.limits.maxComputeWorkgroupsPerDimension},adapterLimits:{maxStorageBufferBindingSize:this.adapter.limits?.maxStorageBufferBindingSize,maxBufferSize:this.adapter.limits?.maxBufferSize,maxComputeWorkgroupsPerDimension:this.adapter.limits?.maxComputeWorkgroupsPerDimension}};
+    for(let base=0;base<count;){
+      const result=await withEccAllocationRetry(count-base,batchSize,async n=>{
+        const qs=Array.from({length:n},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+j)*8+k*2],quads[(base+j)*8+k*2+1]]));
+        return component.run(this.imageView!,this.refsBuffer!,this.imageWidth,this.imageHeight,qs,rotations!.slice(base,base+n));
+      },(from,to)=>{allocationFallbacks.push({from,to});batchSize=to;this.eccBatchPolicy!.chosenBatchSize=to;});
       if(component.lastHostTiming)this.eccBatchTimings.push(component.lastHostTiming);
-      traces.forEach((t,j)=>{output.set(t.quad.flat(),(base+j)*8);this.diagnostics.eccIterations+=t.iterations;this.diagnostics.eccConverged+=Number(t.converged);this.diagnostics.eccIterationLimits+=Number(t.iterationLimitReached);this.diagnostics.eccFailures+=Number(t.status<0);});
+      result.value.forEach((t,j)=>{output.set(t.quad.flat(),(base+j)*8);this.diagnostics.eccIterations+=t.iterations;this.diagnostics.eccConverged+=Number(t.converged);this.diagnostics.eccIterationLimits+=Number(t.iterationLimitReached);this.diagnostics.eccFailures+=Number(t.status<0);});
+      base+=result.count;
     }
     this.diagnostics.eccCandidates+=count;this.diagnostics.eccMs+=performance.now()-start;
     return output;

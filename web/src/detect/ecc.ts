@@ -1,4 +1,4 @@
-import {eccBatchCapacity,ECC_SCRATCH_BUDGET,ECC_QUAD_BYTES} from './ecc-batch';
+import {eccBatchCapacity,ECC_QUAD_BYTES,allocateEccBuffers} from './ecc-batch';
 import {eccShader} from './ecc-shader';
 const entries=['prepare','gaussian','gradients','warp_pixels','statistics','jacobian','normal_equations','update'] as const;
 export interface EccHostTiming {count:number;passes:number;submissions:number;readbacks:number;encodeMs:number;submitToReadbackMs:number;wallMs:number;scratchBytes:number;gpuTimestampMs:null}
@@ -26,13 +26,12 @@ export class BatchedGpuEcc {
   const count=quads.length;if(!count)return [];
   const initial=new Float32Array(count*28);
   quads.forEach((q,i)=>{const base=quadBase(q);const s=i*28;initial.set(base,s);initial.set(diagnosticInitialWarp??[1,0,0,0,1,0,0,0,1],s+9);initial[s+18]=-1;initial[s+19]=-.00001;initial[s+20]=base.every(Number.isFinite)?0:-2;initial[s+22]=rotations[i];});
-  const owned:GPUBuffer[]=[];const buffer=(size:number,usage:number)=>{const b=this.device.createBuffer({size,usage});owned.push(b);return b;};
   const rw=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC;
-  const params=buffer(16,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);this.device.queue.writeBuffer(params,0,new Uint32Array([width,height,count,0]));
-  const states=buffer(initial.byteLength,rw);this.device.queue.writeBuffer(states,0,initial);
-  const patch=buffer(count*81920*4,rw),pixels=buffer(count*16384*5*4,rw),jac=buffer(count*16384*8*4,rw),sums=buffer(count*86*4,rw);
-  const read=buffer(initial.byteLength+count*86*4,GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST);let mapped=false;
+  const sizes=[16,initial.byteLength,count*81920*4,count*16384*5*4,count*16384*8*4,count*86*4,initial.byteLength+count*86*4];
+  const owned=await allocateEccBuffers(this.device,sizes.map((size,i)=>({size,usage:i===0?GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST:i===6?GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST:rw})));
+  const [params,states,patch,pixels,jac,sums,read]=owned;let mapped=false;
   try{
+   this.device.queue.writeBuffer(params,0,new Uint32Array([width,height,count,0]));this.device.queue.writeBuffer(states,0,initial);
    const bind=this.device.createBindGroup({layout:this.pipelines[0].getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:params}},{binding:1,resource:image},{binding:2,resource:{buffer:refs}},...[states,patch,pixels,jac,sums].map((b,i)=>({binding:i+3,resource:{buffer:b}}))]});
    const encodeStart=performance.now();
    const encoder=this.device.createCommandEncoder();const pass=(index:number,x:number,y=1)=>{const c=encoder.beginComputePass();c.setPipeline(this.pipelines[index]);c.setBindGroup(0,bind);c.dispatchWorkgroups(x,y);c.end();};
