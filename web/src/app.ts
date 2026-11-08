@@ -238,3 +238,9 @@ $('#btnAddFace').onclick = () => {
 };
 setMode('auto');
 texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();
+
+$('#btnCopyDetDebug').addEventListener('click',async()=>{
+ const button=$('#btnCopyDetDebug');
+ try{await navigator.clipboard.writeText($('#detDebug').textContent||'No detector diagnostics yet.');button.textContent='Copied';}
+ catch{const selection=window.getSelection();const range=document.createRange();range.selectNodeContents($('#detDebug'));selection?.removeAllRanges();selection?.addRange(range);button.textContent='Select and copy diagnostics';}
+});

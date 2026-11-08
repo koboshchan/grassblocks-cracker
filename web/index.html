@@ -42,7 +42,7 @@
       <div class="group"><div class="line"><span>x y z</span><input id="mx" type="number" step="1" value="0" aria-label="x"><input id="mz" type="number" step="1" value="0" aria-label="z"></div><div class="opt"><span>Height y</span><input id="my" type="number" step="1" value="0"></div></div>
       <div class="row"><button id="btnAddFace" class="btn primary" disabled>Add face</button><button id="btnGrow" class="btn" disabled>Grow from quad</button></div></div>
       <div class="bar" id="detBar" role="progressbar" aria-label="Detection progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i></i></div>
-      <details><summary class="small">Detector diagnostics</summary><pre class="log on" id="detDebug" aria-live="polite">No detection run yet.</pre></details>
+      <details><summary class="small">Detector diagnostics</summary><button id="btnCopyDetDebug" type="button" class="secondary" aria-label="Copy detector diagnostic readout">Copy diagnostics</button><pre class="log on" id="detDebug" aria-live="polite">No detection run yet.</pre></details>
       <pre class="log" id="detLog" aria-live="polite"></pre>
     </section>
 
