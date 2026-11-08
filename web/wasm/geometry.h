@@ -9,7 +9,7 @@ using H3=std::array<double,9>;
 using Camera=std::array<double,12>;
 struct Verdict { bool valid=false; int rotation=0,votes=0; double score=0,margin=0; };
 struct Block:Verdict { Quad quad{}; int x=0,y=0,z=0; };
-struct Options {double accept=.88,margin=.35,relaxed=.78,coarse=.55,refineMin=-1,refineMargin=-1,refineShift=3.5,siftRatio=.68;int refineVotes=3;bool refitPlane=false,refitFlat=false;};
+struct Options {double accept=.88,margin=.35,relaxed=.78,coarse=.55,refineMin=-1,refineMargin=-1,refineShift=3.5,siftRatio=.68;double refineVotes=3;bool refitPlane=false,refitFlat=false;};
 struct Context {int w,h;std::vector<float>g;std::array<double,256>ref;std::array<std::array<double,256>,4>refs;Options opts;};
 struct Plane {bool valid=false;H3 H{};std::vector<int>ids;};
 struct Result {std::vector<Block>blocks,seeds;std::string reason,mode;Camera camera{};H3 planeH{};bool hasCamera=false,hasPlane=false;std::vector<std::string>notes;};
