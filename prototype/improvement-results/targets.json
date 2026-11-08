@@ -1,6 +1,5 @@
 {
   "savanna": {
-    "tiles": 35,
     "seconds": 105.08037686600001,
     "trials": [
       {
@@ -111,10 +110,10 @@
           "3D round 1: 20222 voxel faces tested, 24 accepted over 1 height level(s)"
         ]
       }
-    ]
+    ],
+    "tiles": 35
   },
   "mixed": {
-    "tiles": 99,
     "seconds": 426.584869344,
     "trials": [
       {
@@ -235,6 +234,128 @@
           "3D round 1: 17554 voxel faces tested, 2 accepted over 1 height level(s)"
         ]
       }
-    ]
+    ],
+    "tiles": 99
+  },
+  "lava": {
+    "seconds": 100.16337583,
+    "trials": [
+      {
+        "name": "original",
+        "tiles": 4,
+        "mergedTiles": 4,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 4 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "relaxed",
+        "tiles": 5,
+        "mergedTiles": 5,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 5 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "refine",
+        "tiles": 4,
+        "mergedTiles": 5,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 4 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "refit-refine",
+        "tiles": 4,
+        "mergedTiles": 5,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 4 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "ratio",
+        "tiles": 6,
+        "mergedTiles": 7,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 6 faces",
+          "3D: initial camera from the ground plane (f=1516 px)",
+          "3D round 1: 20899 voxel faces tested, 6 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "combo",
+        "tiles": 5,
+        "mergedTiles": 7,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 5 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "flat-ratio",
+        "tiles": 6,
+        "mergedTiles": 7,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 6 faces",
+          "3D: initial camera from the ground plane (f=1516 px)",
+          "3D round 1: 20899 voxel faces tested, 6 accepted over 1 height level(s)",
+          "3D: flat-height camera refit",
+          "3D round 2: 20899 voxel faces tested, 6 accepted over 1 height level(s)"
+        ]
+      },
+      {
+        "name": "rescue",
+        "tiles": 59,
+        "mergedTiles": 59,
+        "notes": [
+          "3 verified seed tile(s) from feature matching",
+          "plane lattice: 3 coplanar seeds, 4 faces",
+          "3D: initial camera from the ground plane (f=1485 px)",
+          "3D round 1: 21271 voxel faces tested, 4 accepted over 1 height level(s)",
+          "3D: flat-height camera refit",
+          "3D round 2: 20955 voxel faces tested, 8 accepted over 1 height level(s)",
+          "3D: flat-height camera refit",
+          "3D round 3: 20772 voxel faces tested, 32 accepted over 3 height level(s)",
+          "3D: camera refit mean reprojection 0.45 px",
+          "3D round 4: 20738 voxel faces tested, 59 accepted over 4 height level(s)",
+          "3D: camera refit mean reprojection 0.46 px"
+        ]
+      },
+      {
+        "name": "ratio80",
+        "tiles": 23,
+        "mergedTiles": 60,
+        "notes": [
+          "5 verified seed tile(s) from feature matching",
+          "plane lattice: 5 coplanar seeds, 13 faces",
+          "3D: initial camera from the ground plane (f=1528 px)",
+          "3D round 1: 20802 voxel faces tested, 17 accepted over 2 height level(s)",
+          "3D: camera refit mean reprojection 0.68 px",
+          "3D round 2: 20748 voxel faces tested, 20 accepted over 2 height level(s)",
+          "3D: camera refit mean reprojection 0.97 px",
+          "3D round 3: 20695 voxel faces tested, 22 accepted over 2 height level(s)",
+          "3D: camera refit mean reprojection 0.53 px",
+          "3D round 4: 20693 voxel faces tested, 23 accepted over 2 height level(s)",
+          "3D: camera refit mean reprojection 0.66 px"
+        ]
+      }
+    ],
+    "tiles": 60
   }
 }
