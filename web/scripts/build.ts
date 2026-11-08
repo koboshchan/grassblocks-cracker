@@ -3,7 +3,7 @@ import {mkdir,cp,readFile,writeFile,access} from 'node:fs/promises';
 import {resolve} from 'node:path';
 const inlineWorker:Plugin={name:'inline-worker',setup(b){
  b.onResolve({filter:/^inline-worker:/},a=>({path:resolve(a.resolveDir,a.path.slice(14)+'.ts'),namespace:'inline-classic'}));
- b.onLoad({filter:/.*/,namespace:'inline-classic'},async a=>{const inner=await build({entryPoints:[a.path],bundle:true,write:false,minify:true,format:'iife',target:'es2022',platform:'browser',define:{'import.meta.url':'self.location.href'}});return {contents:`export default ${JSON.stringify(inner.outputFiles[0].text)}`,loader:'js'};});
+ b.onLoad({filter:/.*/,namespace:'inline-classic'},async a=>{const inner=await build({entryPoints:[a.path],bundle:true,write:false,minify:true,format:'iife',target:'es2022',platform:'browser',plugins:[inlineWorker],define:{'import.meta.url':'self.location.href'}});return {contents:`export default ${JSON.stringify(inner.outputFiles[0].text)}`,loader:'js'};});
  b.onResolve({filter:/\?worker$/},a=>({path:resolve(a.resolveDir,a.path.slice(0,-7)),namespace:'inline-worker'}));
  b.onLoad({filter:/.*/,namespace:'inline-worker'},async a=>{
   const inner=await build({entryPoints:[a.path],bundle:true,write:false,minify:true,format:'esm',target:'es2022',platform:'browser'});

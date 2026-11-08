@@ -1,11 +1,14 @@
 /// <reference lib="webworker" />
 import * as pipeline from './pipeline';
+import {detectParallel} from './wasm-pool';
 import { WebGpuDetector } from './webgpu';
 import { runWebGpuDetection } from './webgpu-pipeline';
 
 declare const self: DedicatedWorkerGlobalScope & { GrassPipeline?: (opts: any) => Promise<pipeline.PipelineModule> };
 
 let ready = false;
+let nativeUrl = '';
+let detecting = false;
 let webgpuDetector: WebGpuDetector | null = null;
 let webgpuReady = false;
 
@@ -45,6 +48,7 @@ async function init(pipelineUrl: string) {
   }
 
   const url = new URL(pipelineUrl);
+  nativeUrl = url.href;
   self.importScripts(url.href);
   if (!self.GrassPipeline) throw Error('Native WASM pipeline factory unavailable');
   const module = await self.GrassPipeline({ locateFile: (name: string) => new URL(name, url).href });
@@ -67,6 +71,7 @@ self.onmessage = async (ev: MessageEvent) => {
       return;
     }
     if (m.type !== 'detect' && m.type !== 'classifyQuad') return;
+    if (detecting) throw Error('Native WASM detection is busy');
     if (!ready) throw Error('Native WASM detection pipeline not initialized');
     if (!Number.isSafeInteger(m.width) || !Number.isSafeInteger(m.height) || m.width < 8 || m.height < 8 || m.width * m.height > 16 * 1024 * 1024 || !(m.buffer instanceof ArrayBuffer) || m.buffer.byteLength !== m.width * m.height * 4)
       throw Error('Invalid image buffer. Expected packed RGBA pixels and valid dimensions (maximum 16 megapixels).');
@@ -174,7 +179,14 @@ self.onmessage = async (ev: MessageEvent) => {
     }
     post({ type: 'progress', backend: pipeline.detectorBackend, text: 'Detecting grass in native WASM', fraction: 0, indeterminate: true });
     const started = performance.now();
-    const result = pipeline.detect(data, m.width, m.height, m.ref, detectOpts, m.seeds || []);
+    let result;
+    if (pipeline.poolAvailable() && typeof Worker !== 'undefined' && navigator.hardwareConcurrency > 1 && pipeline.automaticOptions(detectOpts,m.seeds || [])) {
+      detecting = true;
+      try { result = await detectParallel(nativeUrl,data,m.width,m.height,m.ref,post); }
+      finally { detecting = false; }
+    } else {
+      result = pipeline.detect(data,m.width,m.height,m.ref,detectOpts,m.seeds || []);
+    }
     post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });
   } catch (e: any) {
     post({ type: 'error', text: String(e?.stack || e?.message || e) });

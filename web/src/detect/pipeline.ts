@@ -24,3 +24,40 @@ export function detect(rgba:Uint8Array,w:number,h:number,ref:unknown,opts:Record
 /** Raw SIFT/homography proposals, not native detection or verified blocks. */
 export type FeatureSeedResult={seeds:number[][][];featureBackend:string;timingsMs:{featureExtraction:number;matchingHomography:number;total:number}};
 export function featureSeeds(rgba:Uint8Array,w:number,h:number,ref:unknown,opts:Record<string,unknown>={}):FeatureSeedResult{const m=module(),owned:number[]=[];try{const p=alloc(rgba,owned),r=alloc(reference(ref),owned),o=alloc(options(opts),owned);m._grass_feature_seeds(p,w,h,r,o);return result();}finally{owned.forEach(p=>m._free(p));}}
+
+/** Additive automatic-trial ABI. Each worker owns its own module and statics. */
+export type PoolModule = PipelineModule & {
+ _grass_pool_prepare(p:number,w:number,h:number,r:number):number;
+ _grass_pool_trial(p:number,w:number,h:number,r:number,i:number,q:number,n:number):number;
+ _grass_pool_blob():number; _grass_pool_blob_size():number;
+ _grass_pool_submit(i:number,p:number,n:number):number;
+ _grass_pool_finish():number; _grass_pool_abort():void;
+};
+export type TrialPlan={index:number;name:string;raw:number[][]};
+export function automaticOptions(opts:Record<string,unknown>={},seeds:unknown[]=[]){
+ return !seeds.length&&!Object.entries(opts).some(([key,value])=>key!=='accept'||value!==.88);
+}
+export function poolAvailable(){return typeof (module() as PoolModule)._grass_pool_prepare==='function';}
+export function heapBytes(){return module().HEAPU8.byteLength;}
+export function prepareTrials(rgba:Uint8Array,w:number,h:number,ref:unknown):TrialPlan[]{
+ const m=module() as PoolModule,owned:number[]=[];
+ try{m._grass_pool_prepare(alloc(rgba,owned),w,h,alloc(reference(ref),owned));const r=result();
+  if(!Array.isArray(r.plans)||r.plans.length!==9||r.plans.some((p:TrialPlan,i:number)=>p.index!==i||!Array.isArray(p.raw)||p.raw.length>4096||p.raw.some(q=>!Array.isArray(q)||q.length!==8||q.some(v=>!Number.isFinite(v)))))throw Error('Invalid native trial plans');
+  return r.plans;
+ }finally{owned.forEach(p=>m._free(p));}
+}
+export function automaticTrial(rgba:Uint8Array,w:number,h:number,ref:unknown,plan:TrialPlan){
+ const m=module() as PoolModule,owned:number[]=[];
+ if(!Number.isInteger(plan.index)||plan.index<0||plan.index>=9||!Array.isArray(plan.raw)||plan.raw.length>4096||plan.raw.some(q=>!Array.isArray(q)||q.length!==8||q.some(v=>!Number.isFinite(v))))throw Error('Invalid automatic trial plan');
+ try{const p=alloc(rgba,owned),r=alloc(reference(ref),owned),q=alloc(new Float64Array(plan.raw.flat()),owned);
+  m._grass_pool_trial(p,w,h,r,plan.index,q,plan.raw.length);result();
+  const size=m._grass_pool_blob_size(),ptr=m._grass_pool_blob();
+  if(!Number.isSafeInteger(size)||size<4||size>32*1024*1024||ptr<0||ptr+size>m.HEAPU8.byteLength)throw Error('Invalid native trial snapshot');
+  return m.HEAPU8.slice(ptr,ptr+size);
+ }finally{owned.forEach(p=>m._free(p));}
+}
+export function submitTrial(index:number,snapshot:Uint8Array){const m=module() as PoolModule,owned:number[]=[];
+ try{m._grass_pool_submit(index,alloc(snapshot,owned),snapshot.byteLength);result();}finally{owned.forEach(p=>m._free(p));}
+}
+export function finishTrials(){const m=module() as PoolModule;m._grass_pool_finish();return result();}
+export function abortTrials(){(module() as PoolModule)._grass_pool_abort();}

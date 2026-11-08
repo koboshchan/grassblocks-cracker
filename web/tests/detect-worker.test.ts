@@ -12,6 +12,8 @@ async function workerHarness(gpu = true) {
     plugins: [{
       name: 'fake-gpu',
       setup(b) {
+        b.onResolve({filter:/^inline-worker:/},()=>({path:'trial-source',namespace:'inline-test'}));
+        b.onLoad({filter:/.*/,namespace:'inline-test'},()=>({contents:'export default "";'}));
         b.onResolve({ filter: /^\.\/webgpu$/ }, () => ({ path: 'gpu', namespace: 'fake' }));
         b.onResolve({ filter: /^\.\/webgpu-pipeline$/ }, () => ({ path: 'runner', namespace: 'fake' }));
         b.onLoad({ filter: /.*/, namespace: 'fake' }, ({ path }) => ({
