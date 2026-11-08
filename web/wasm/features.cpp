@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -19,6 +20,25 @@ namespace {
 constexpr std::size_t MaxInputPixels = 16 * 1024 * 1024;
 constexpr int MaxSiftPixels = 1024 * 1024;
 constexpr int FeatureStride = 130;
+
+// Scope-based accounting also records work done before an extraction throws.
+class PhaseTimer {
+    using Clock = std::chrono::steady_clock;
+    double* destination;
+    Clock::time_point start;
+public:
+    explicit PhaseTimer(double* output) : destination(output) {
+        if (destination) start = Clock::now();
+    }
+    PhaseTimer(const PhaseTimer&) = delete;
+    PhaseTimer& operator=(const PhaseTimer&) = delete;
+    void stop() noexcept {
+        if (!destination) return;
+        *destination += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        destination = nullptr;
+    }
+    ~PhaseTimer() { stop(); }
+};
 
 struct PreparedImage {
     std::vector<float> data;
@@ -183,9 +203,11 @@ unsigned char jsUint8(double value) {
 } // namespace
 
 std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
-                           const std::array<double, 256>& ref, double ratio) {
+                           const std::array<double, 256>& ref, double ratio,
+                           FeatureTimings* timings) {
     if (!std::isfinite(ratio))
         throw std::invalid_argument("Invalid SIFT ratio");
+    PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
     constexpr int S = 256;
     std::vector<float> texture(S * S);
     for (int y = 0; y < S; ++y)
@@ -193,6 +215,8 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
             texture[y * S + x] = static_cast<float>(ref[(y / 16) * 16 + x / 16]);
     const auto a = features(texture, S, S);
     const auto b = features(green, w, h);
+    extractionTimer.stop();
+    PhaseTimer matchingTimer(timings && b.count > 0 ? &timings->matchingHomography : nullptr);
     std::vector<cv::Point2f> P, Q;
     for (int i = 0; i < b.count; ++i) {
         const int bi = i * FeatureStride + 2;
@@ -236,17 +260,21 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
 }
 
 std::vector<Quad> binarySeeds(const std::vector<float>& green, int w, int h,
-                             const std::array<double, 256>& ref) {
+                             const std::array<double, 256>& ref,
+                             FeatureTimings* timings) {
+    PhaseTimer preparationTimer(timings ? &timings->extraction : nullptr);
     const auto image = prepareImage(green, w, h);
     cv::Mat img(image.height, image.width, CV_8UC1);
     for (std::size_t i = 0; i < image.data.size(); ++i)
         img.data[i] = jsUint8(image.data[i]);
     cv::Mat refSmall(16, 16, CV_8UC1);
     for (int i = 0; i < 256; ++i) refSmall.data[i] = jsUint8(ref[i]);
+    preparationTimer.stop();
     std::vector<Quad> found;
     for (int S : {64, 96, 128}) {
         for (int interp : {cv::INTER_NEAREST, cv::INTER_LINEAR}) {
             for (int feat = 0; feat < 2; ++feat) {
+                PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
                 cv::Mat refBig;
                 cv::resize(refSmall, refBig, cv::Size(S, S), 0, 0, interp);
                 cv::Ptr<cv::Feature2D> detector;
@@ -264,6 +292,9 @@ std::vector<Quad> binarySeeds(const std::vector<float>& green, int w, int h,
                 cv::Mat dr, ds;
                 detector->detectAndCompute(refBig, cv::noArray(), kr, dr);
                 detector->detectAndCompute(img, cv::noArray(), ks, ds);
+                extractionTimer.stop();
+                PhaseTimer matchingTimer(timings && dr.rows >= 4 && ds.rows >= 4
+                    ? &timings->matchingHomography : nullptr);
                 std::vector<cv::Point2f> P, Q;
                 if (dr.rows >= 4 && ds.rows >= 4) {
                     cv::BFMatcher matcher(cv::NORM_HAMMING, false);
