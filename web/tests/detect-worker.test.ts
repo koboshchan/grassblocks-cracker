@@ -47,7 +47,7 @@ async function workerHarness(gpu = true) {
     navigator: gpu ? { gpu: {} } : {}, URL, performance, console,
     Uint8Array, Float64Array, ArrayBuffer,
     fetch: async () => ({ ok: true, text: async () => 'shader' }),
-    createGpu: async () => ({checked: (work: any) => work()}),
+    createGpu: async () => ({checked: (work: any) => work(),adapterInfo:{description:'test'},diagnostics:{}}),
     runGpu: async (_detector: unknown, _img: unknown, _ref: unknown, opts: any) => {
       const seeds = opts.seeds?.length ? opts.seeds : await opts.featureSeeds();
       assert.equal(JSON.stringify(seeds), JSON.stringify(candidates));
@@ -84,16 +84,16 @@ test('forced WASM strips routing option and preserves automatic native multi-tri
 
 test('automatic GPU detection requests native feature proposals, not full native detection', async () => {
   const h = await workerHarness();
-  assert.match((await h.detect({ backend: 'webgpu', siftRatio: .76 })).backend, /^WebGPU experimental/);
+  assert.match((await h.detect({ backend: 'webgpu', siftRatio: .76 })).backend, /^GPU ECC/);
   assert.equal(h.features.length, 1);
   assert.equal(h.detects.length, 0);
   assert.ok(h.messages.some(m => m.type === 'log' && m.text.includes('WebGPU feature proposals')));
-  assert.equal(h.native.HEAPF64[h.features[0][4] / 8 + 7], .76);
+  assert.equal(h.native.HEAPF64[h.features[0][4] / 8 + 7], .68);
 });
 
 test('manual GPU detection does not generate automatic features', async () => {
   const h = await workerHarness();
-  assert.match((await h.detect({ backend: 'webgpu' }, h.candidates)).backend, /^WebGPU experimental/);
+  assert.match((await h.detect({ backend: 'webgpu' }, h.candidates)).backend, /^GPU ECC/);
   assert.equal(h.features.length, 0);
   assert.equal(h.detects.length, 0);
 });
@@ -103,25 +103,18 @@ test('GPU zero faces remains an explicit GPU result, not hidden native validatio
   h.scope.runGpu = async () => ({blocks:[]});
   const result = await h.detect();
   assert.equal(result.blocks.length,0);
-  assert.match(result.backend,/^WebGPU experimental/);
+  assert.match(result.backend,/^GPU ECC/);
   assert.equal(h.detects.length,0);
 });
 
-test('GPU unavailable fallback strips routing option', async () => {
-  const h = await workerHarness(false);
-  const result = await h.detect({ backend: 'webgpu' });
-  assert.match(result.backend, /WASM.*WebGPU fallback/);
-  assert.ok(result.fallbackReason);
-  assert.equal(h.detects[0].at(-1), 1);
-});
-
-test('GPU exception fallback preserves automatic native trial routing', async () => {
-  const h = await workerHarness();
-  h.scope.runGpu = async () => { throw Error('device lost'); };
-  const result = await h.detect({ backend: 'webgpu' });
-  assert.match(result.backend, /WASM.*WebGPU fallback/);
-  assert.ok(result.fallbackReason);
-  assert.equal(h.detects[0].at(-1), 1);
+test('GPU unavailable and execution failure are errors, never native fallback',async()=>{
+ for(const fail of ['unavailable','execution']){
+ const h=await workerHarness();
+ if(fail==='unavailable')delete h.scope.navigator.gpu;else h.scope.runGpu=async()=>{throw Error('GPU execution failed');};
+ await assert.rejects(h.detect({backend:'webgpu'}));
+ assert.equal(h.detects.length,0);
+ assert.ok(h.messages.some(m=>m.type==='error'&&m.backend==='GPU error (no WASM fallback)'));
+ }
 });
 
 test('manual native routing preserves seed count and disables automatic trials', async () => {
@@ -139,27 +132,17 @@ test('experimental GPU returns its own faces/order/coordinates without native gu
   const result = await h.detect();
   assert.equal(result.blocks,blocks);
   assert.deepEqual(result.camera,[123]);
-  assert.match(result.backend,/WebGPU experimental/);
+  assert.match(result.backend,/GPU ECC/);
   assert.equal(result.parityValidation,undefined);
   assert.equal(h.detects.length,0);
 });
 
-test('initialization exception falls back and exposes actual WASM backend', async () => {
-  const h = await workerHarness();
-  h.scope.createGpu = async () => {throw Error('adapter init failed');};
-  const result = await h.detect();
-  assert.match(result.backend,/WASM.*WebGPU fallback/);
-  assert.ok(result.fallbackReason);
-  assert.equal(h.detects[0].at(-1),1);
-});
-
-test('device scope error falls back without exposing GPU faces', async () => {
-  const h = await workerHarness();
-  h.scope.createGpu = async () => ({checked: async (work:any) => {await work();throw Error('WebGPU device lost');}});
-  const result = await h.detect();
-  assert.match(result.backend,/WASM.*WebGPU fallback/);
-  assert.match(result.fallbackReason,/device lost/);
-  assert.equal(h.detects.length,1);
+test('initialization and device scope errors stop explicit GPU selection',async()=>{
+ for(const failure of ['init','device']){
+ const h=await workerHarness();
+ h.scope.createGpu=async()=>{if(failure==='init')throw Error('adapter failed');return {checked:async(work:any)=>{await work();throw Error('device lost');}};};
+ await assert.rejects(h.detect({backend:'webgpu'}));assert.equal(h.detects.length,0);
+ }
 });
 
 test('invalid backend fails closed to WASM without GPU initialization', async () => {

@@ -83,6 +83,58 @@ fn get_transform(quad: Quad) -> Transform {
     return Transform(a, b, c, d, e, f, g, h, true);
 }
 
+// Corrected centered two-pass covariance (Chan/Golub/LeVeque), with
+// Kahan compensated reductions. No sampling, geometry, threshold or CPU changes.
+// References: https://www.osti.gov/servlets/purl/1028931
+// https://math.pku.edu.cn/teachers/litj/notes/numer_anal/AmerStat_37_242_Chan_Variance.pdf
+struct Compensated4 { value:vec4<f32>, correction:vec4<f32> }
+fn compensated_add(acc:Compensated4, term:vec4<f32>) -> Compensated4 {
+    let residual = term - acc.correction;
+    let total = acc.value + residual;
+    return Compensated4(total, (total - acc.value) - residual);
+}
+struct CenteredCorrelation { scores:vec4<f32>, variance:f32 }
+// region=4 means all196 pixels; regions0..3 are the unchanged49-pixel votes.
+fn centered_correlation(sampled_patch:ptr<function,array<f32,256>>, region:u32) -> CenteredCorrelation {
+    var sum_a = Compensated4(vec4<f32>(0.0),vec4<f32>(0.0));
+    let count = select(49.0,196.0,region==4u);
+    for(var j=1u;j<15u;j=j+1u){for(var i=1u;i<15u;i=i+1u){
+        let q=select(0u,1u,i>=8u)+select(0u,2u,j>=8u);
+        if(region==4u||region==q){
+            sum_a=compensated_add(sum_a,vec4<f32>((*sampled_patch)[j*16u+i]));
+        }
+    }}
+    let mean_a=sum_a.value/count;
+    // Existing reference sums are exact uint8 integer sums, not raw variances.
+    var reference_sum=stats.sb;
+    if(region<4u){reference_sum=stats.q_sb[region];}
+    let mean_b=reference_sum/count;
+    var square_a=Compensated4(vec4<f32>(0.0),vec4<f32>(0.0));
+    var square_b=square_a;var product=square_a;
+    var deviation_a=square_a;var deviation_b=square_a;
+    for(var j=1u;j<15u;j=j+1u){for(var i=1u;i<15u;i=i+1u){
+        let q=select(0u,1u,i>=8u)+select(0u,2u,j>=8u);
+        if(region==4u||region==q){
+            let da=vec4<f32>((*sampled_patch)[j*16u+i])-mean_a;
+            let db=refs[j*16u+i]-mean_b;
+            square_a=compensated_add(square_a,da*da);
+            square_b=compensated_add(square_b,db*db);
+            product=compensated_add(product,da*db);
+            deviation_a=compensated_add(deviation_a,da);
+            deviation_b=compensated_add(deviation_b,db);
+        }
+    }}
+    // Correct mean-rounding error using centered residual sums, not large raw moments.
+    let va=square_a.value-deviation_a.value*deviation_a.value/count;
+    let vb=square_b.value-deviation_b.value*deviation_b.value/count;
+    let covariance=product.value-deviation_a.value*deviation_b.value/count;
+    var scores=vec4<f32>(0.0);
+    if(va.x>1e-7){for(var k=0u;k<4u;k=k+1u){
+        if(vb[k]>1e-7){scores[k]=covariance[k]/sqrt(va.x*vb[k]);}
+    }}
+    return CenteredCorrelation(scores,va.x);
+}
+
 fn eval_quad_score(quad: Quad) -> f32 {
     let t = get_transform(quad);
     if (!t.valid) {
@@ -92,9 +144,7 @@ fn eval_quad_score(quad: Quad) -> f32 {
     let img_w = f32(params.width);
     let img_h = f32(params.height);
 
-    var sa = 0.0;
-    var aa = 0.0;
-    var ab = vec4<f32>(0.0);
+    var sampled_patch:array<f32,256>;
 
     for (var j = 1u; j < 15u; j = j + 1u) {
         let v = f32(j) + 0.5;
@@ -116,28 +166,14 @@ fn eval_quad_score(quad: Quad) -> f32 {
             let sample_val = textureSampleLevel(t_image, s_image, uv, 0.0).r * 255.0;
             let ref_val = refs[j * 16u + i];
 
-            sa = sa + sample_val;
-            aa = aa + sample_val * sample_val;
-            ab = ab + sample_val * ref_val;
+            sampled_patch[j*16u+i] = sample_val;
         }
     }
 
-    let va = aa - (sa * sa) / 196.0;
-    if (va <= 1e-7) {
-        return -1.0;
-    }
-
-    var best_sc = -1.0;
-    for (var k = 0u; k < 4u; k = k + 1u) {
-        let vb_k = stats.vb[k];
-        if (vb_k > 1e-7) {
-            let cov_k = ab[k] - (sa * stats.sb[k]) / 196.0;
-            let sc_k = cov_k / sqrt(va * vb_k);
-            if (sc_k > best_sc) {
-                best_sc = sc_k;
-            }
-        }
-    }
+    let centered=centered_correlation(&sampled_patch,4u);
+    if(centered.variance<=1e-7){return -1.0;}
+    var best_sc=-1.0;
+    for(var k=0u;k<4u;k=k+1u){if(centered.scores[k]>best_sc){best_sc=centered.scores[k];}}
 
     return best_sc;
 }
@@ -151,14 +187,7 @@ fn eval_full_result(quad: Quad) -> Result {
     let img_w = f32(params.width);
     let img_h = f32(params.height);
 
-    var q_sa = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-    var q_aa = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-    var q_ab = array<vec4<f32>, 4>(
-        vec4<f32>(0.0),
-        vec4<f32>(0.0),
-        vec4<f32>(0.0),
-        vec4<f32>(0.0)
-    );
+    var sampled_patch:array<f32,256>;
 
     for (var j = 1u; j < 15u; j = j + 1u) {
         let v = f32(j) + 0.5;
@@ -179,31 +208,11 @@ fn eval_full_result(quad: Quad) -> Result {
             let uv = vec2<f32>((px + 0.5) / img_w, (py + 0.5) / img_h);
             let sample_val = textureSampleLevel(t_image, s_image, uv, 0.0).r * 255.0;
 
-            let q = select(0u, 1u, i >= 8u) + select(0u, 2u, j >= 8u);
-            let ref_val = refs[j * 16u + i];
-
-            q_sa[q] = q_sa[q] + sample_val;
-            q_aa[q] = q_aa[q] + sample_val * sample_val;
-            q_ab[q] = q_ab[q] + sample_val * ref_val;
+            sampled_patch[j*16u+i] = sample_val;
         }
     }
 
-    let sa = q_sa[0] + q_sa[1] + q_sa[2] + q_sa[3];
-    let aa = q_aa[0] + q_aa[1] + q_aa[2] + q_aa[3];
-    let ab = q_ab[0] + q_ab[1] + q_ab[2] + q_ab[3];
-
-    let va = aa - (sa * sa) / 196.0;
-
-    var sc = vec4<f32>(0.0);
-    if (va > 1e-7) {
-        for (var k = 0u; k < 4u; k = k + 1u) {
-            let vb_k = stats.vb[k];
-            if (vb_k > 1e-7) {
-                let cov_k = ab[k] - (sa * stats.sb[k]) / 196.0;
-                sc[k] = cov_k / sqrt(va * vb_k);
-            }
-        }
-    }
+    let sc=centered_correlation(&sampled_patch,4u).scores;
 
     var best = 0u;
     for (var k = 1u; k < 4u; k = k + 1u) {
@@ -224,24 +233,7 @@ fn eval_full_result(quad: Quad) -> Result {
 
     var votes = 0u;
     for (var q = 0u; q < 4u; q = q + 1u) {
-        let q_sa_val = q_sa[q];
-        let q_aa_val = q_aa[q];
-        let q_ab_val = q_ab[q];
-        let q_va = q_aa_val - (q_sa_val * q_sa_val) / 49.0;
-
-        let q_sb_val = stats.q_sb[q];
-        let q_vb_val = stats.q_vb[q];
-
-        var q_sc = vec4<f32>(0.0);
-        if (q_va > 1e-7) {
-            for (var k = 0u; k < 4u; k = k + 1u) {
-                let vb_k = q_vb_val[k];
-                if (vb_k > 1e-7) {
-                    let cov_k = q_ab_val[k] - (q_sa_val * q_sb_val[k]) / 49.0;
-                    q_sc[k] = cov_k / sqrt(q_va * vb_k);
-                }
-            }
-        }
+        let q_sc=centered_correlation(&sampled_patch,q).scores;
 
         var q_best = 0u;
         for (var k = 1u; k < 4u; k = k + 1u) {

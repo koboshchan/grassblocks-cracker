@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { applyH, dltCamera, planeFromSeeds, runWebGpuDetection } from '../src/detect/webgpu-pipeline';
+import { applyH, dltCamera, planeFromSeeds, runWebGpuDetection, runSingleGpuDetection } from '../src/detect/webgpu-pipeline';
 
 test('runWebGpuDetection structure and validation', async () => {
   // Test interface and validation behavior when no seeds match
@@ -72,7 +72,7 @@ test('automatic feature seeds retain native order and duplicates before anchor f
   // A duplicate must survive automatic seed verification just as in native.
   const seeds = [...fixture, fixture[0]];
   const expected = planeFromSeeds(seeds)!;
-  const result = await runWebGpuDetection(featureOrderDetector(seeds),
+  const result = await runSingleGpuDetection(featureOrderDetector(seeds),
     { width: 700, height: 650, data: new Uint8Array(700*650*4) },
     Array.from({ length: 16 }, () => Array(16).fill(128)),
     { featureSeeds: seeds, refineMin: 2 });
@@ -96,10 +96,21 @@ test('manual seeds preserve existing score ordering and seed NMS behavior', asyn
     { quad, rotation: 0, score: .9, margin: .5, votes: 4 },
     { quad, rotation: 0, score: .95, margin: .5, votes: 4 },
   ];
-  const result = await runWebGpuDetection(featureOrderDetector(seeds),
+  const result = await runSingleGpuDetection(featureOrderDetector(seeds),
     { width: 64, height: 64, data: new Uint8Array(64*64*4) },
     Array.from({ length: 16 }, () => Array(16).fill(128)),
     { seeds, refineMin: 2 });
   assert.equal(result.seeds.length, 1);
   assert.ok(Math.abs(result.seeds[0].score-.95) < 1e-6);
+});
+
+
+test('eligible already-accepted seeds invoke real ECC adapter, no greedy bypass',async()=>{
+ let ecc=0;const detector:any={setImage(){},setRefs(){},async classifyBatch(q:Float32Array){const a=new Float32Array(q.length/8*5);for(let i=0;i<q.length/8;i++)a.set([1,0,.99,.5,4],i*5);return a;},async refineBatch(q:Float32Array,rotations:number[]){ecc++;assert.ok(rotations.every(r=>r===0));return q.slice();}};
+ await runSingleGpuDetection(detector,{width:64,height:64,data:new Uint8Array(64*64*4)},Array.from({length:16},()=>Array(16).fill(128)),{seeds:[[[10,10],[50,10],[50,50],[10,50]]],maxFaces:1});
+ assert.ok(ecc>0);
+ const source=readFileSync(new URL('../src/detect/webgpu.ts',import.meta.url),'utf8');
+ assert.match(source,/BatchedGpuEcc.create/);assert.match(source,/component.run/);
+ const body=source.slice(source.indexOf('async refineBatch('),source.indexOf('destroy():'));
+ assert.doesNotMatch(body,/refine_main|refinePipeline/);
 });

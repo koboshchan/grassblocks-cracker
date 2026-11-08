@@ -1,3 +1,4 @@
+import {BatchedGpuEcc} from './ecc';
 /**
  * WebGPU implementation of the dense patch detector kernel.
  */
@@ -303,6 +304,8 @@ export class WebGpuDetector {
   }
 
   async classifyBatch(quads: Float32Array): Promise<Float32Array> {
+    const classifiedAt=performance.now();
+    this.diagnostics.classified+=quads.length/8;
     if (this.destroyed) throw new Error('WebGpuDetector is destroyed');
     if (!this.imageTexture || !this.imageView || !this.sampler) {
       throw new Error('Image not set. Call setImage() before classifyBatch()');
@@ -375,93 +378,34 @@ export class WebGpuDetector {
       if (mapped) {
         readBuffer.unmap();
       }
+      this.diagnostics.classifyMs+=performance.now()-classifiedAt;
       quadsBuffer.destroy();
       resultsBuffer.destroy();
       readBuffer.destroy();
     }
   }
 
-  async refineBatch(quads: Float32Array): Promise<Float32Array> {
-    if (this.destroyed) throw new Error('WebGpuDetector is destroyed');
-    if (!this.refinePipeline) {
-      throw new Error('Refine pipeline not initialized');
+  private eccComponent: Promise<BatchedGpuEcc> | null = null;
+  public diagnostics = {classified:0,eccCandidates:0,classifyMs:0,eccMs:0,eccIterations:0,eccConverged:0,eccIterationLimits:0,eccFailures:0};
+  get adapterInfo(): Record<string,unknown> {
+    const info=(this.adapter as any).info;
+    return info ? {vendor:info.vendor,architecture:info.architecture,device:info.device,description:info.description,isFallbackAdapter:(this.adapter as any).isFallbackAdapter} : {description:'adapter info unavailable'};
+  }
+  async refineBatch(quads: Float32Array, rotations?:number[]): Promise<Float32Array> {
+    if (this.destroyed || !this.imageView || !this.refsBuffer) throw Error('ECC image/references unavailable');
+    this.eccComponent ??= BatchedGpuEcc.create(this.device);
+    const component=await this.eccComponent;
+    const count=quads.length/8;
+    if (!Number.isInteger(count)) throw Error('Invalid ECC quad buffer');
+    if (!rotations) {const v=await this.classifyBatch(quads);rotations=Array.from({length:count},(_,i)=>Math.round(v[i*5+1]));}
+    const output=new Float32Array(quads.length);const start=performance.now();
+    for(let base=0;base<count;base+=8){
+      const qs=Array.from({length:Math.min(8,count-base)},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+j)*8+k*2],quads[(base+j)*8+k*2+1]]));
+      const traces=await component.run(this.imageView,this.refsBuffer,this.imageWidth,this.imageHeight,qs,rotations.slice(base,base+qs.length));
+      traces.forEach((t,j)=>{output.set(t.quad.flat(),(base+j)*8);this.diagnostics.eccIterations+=t.iterations;this.diagnostics.eccConverged+=Number(t.converged);this.diagnostics.eccIterationLimits+=Number(t.iterationLimitReached);this.diagnostics.eccFailures+=Number(t.status<0);});
     }
-    if (!this.imageTexture || !this.imageView || !this.sampler) {
-      throw new Error('Image not set. Call setImage() before refineBatch()');
-    }
-    if (!this.refStatsBuffer || !this.refsBuffer) {
-      throw new Error('References not set. Call setRefs() before refineBatch()');
-    }
-    if (quads.length % 8 !== 0) {
-      throw new Error('Quads length must be a multiple of 8 (8 floats per quad)');
-    }
-
-    const count = quads.length / 8;
-    if (count === 0) {
-      return new Float32Array(0);
-    }
-
-    const paramsData = new Uint32Array([this.imageWidth, this.imageHeight, count, 0]);
-    this.device.queue.writeBuffer(this.paramsBuffer, 0, paramsData);
-
-    const quadsByteLength = Math.max(32, quads.byteLength);
-    const quadsBuffer = this.device.createBuffer({
-      size: quadsByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-    });
-    this.device.queue.writeBuffer(quadsBuffer, 0, quads);
-
-    const resultByteLength = Math.max(20, count * 20);
-    const resultsBuffer = this.device.createBuffer({
-      size: resultByteLength,
-      usage: GPUBufferUsage.STORAGE,
-    });
-
-    const readQuadsBuffer = this.device.createBuffer({
-      size: quadsByteLength,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
-    let mapped = false;
-    try {
-      const bindGroup = this.device.createBindGroup({
-        layout: this.refinePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: this.paramsBuffer } },
-          { binding: 1, resource: { buffer: this.refStatsBuffer } },
-          { binding: 2, resource: { buffer: quadsBuffer } },
-          { binding: 3, resource: { buffer: resultsBuffer } },
-          { binding: 4, resource: this.imageView },
-          { binding: 5, resource: this.sampler },
-          { binding: 6, resource: { buffer: this.refsBuffer } },
-        ],
-      });
-
-      const commandEncoder = this.device.createCommandEncoder();
-      const pass = commandEncoder.beginComputePass();
-      pass.setPipeline(this.refinePipeline);
-      pass.setBindGroup(0, bindGroup);
-      const workgroupCount = Math.ceil(count / 64);
-      pass.dispatchWorkgroups(workgroupCount, 1, 1);
-      pass.end();
-
-      commandEncoder.copyBufferToBuffer(quadsBuffer, 0, readQuadsBuffer, 0, count * 32);
-      this.device.queue.submit([commandEncoder.finish()]);
-
-      await readQuadsBuffer.mapAsync(GPUMapMode.READ);
-      mapped = true;
-
-      const out = new Float32Array(count * 8);
-      out.set(new Float32Array(readQuadsBuffer.getMappedRange(0, count * 32)));
-      return out;
-    } finally {
-      if (mapped) {
-        readQuadsBuffer.unmap();
-      }
-      quadsBuffer.destroy();
-      resultsBuffer.destroy();
-      readQuadsBuffer.destroy();
-    }
+    this.diagnostics.eccCandidates+=count;this.diagnostics.eccMs+=performance.now()-start;
+    return output;
   }
 
   destroy(): void {

@@ -36,6 +36,7 @@ function startWorker() {
   const base = new URL('.', location.href).href;
   worker.onmessage = e => {
     const m = e.data;
+    if (m.type === 'progress' || m.type === 'error') $('#detDebug').textContent = JSON.stringify(m,null,2);
     showBackend(m);
     if (m.type === 'ready') { ready = true; showBackend(m); setStatus('ready', 'ok'); busyDet(false); upd(); }
     else if (m.type === 'backend') { $('#detBackend').textContent = m.backend; }
@@ -60,6 +61,7 @@ function startWorker() {
 }
 function busyDet(b: boolean) { detectorChoice.disabled = b; $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
 function onResult(r: any) {
+  $('#detDebug').textContent = JSON.stringify({backend:r.backend,faces:r.blocks?.length,seeds:r.seeds?.length,seconds:r.seconds,diagnostics:r.diagnostics,trials:r.trials},null,2);
   busyDet(false); setStatus('ready', 'ok');
   showBackend(r);
   const sec = (r.seconds ?? r.transportSeconds ?? 0).toFixed(1) + 's';

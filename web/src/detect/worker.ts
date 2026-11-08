@@ -27,8 +27,8 @@ async function chooseGpu(backend: unknown): Promise<boolean> {
     gpuInit ??= initGpu(nativeUrl);
     await gpuInit;
     if (webgpuReady && webgpuDetector) return true;
-    fallback("WebGPU unavailable or initialization failed");
-  } catch (e) { fallback(String(e)); }
+    throw Error("WebGPU unavailable or initialization failed; GPU selection does not fall back to WASM");
+  } catch (e) { throw e; }
   return false;
 }
 function backendResult<T extends object>(result:T):T & {fallbackReason?:string} {
@@ -65,7 +65,7 @@ async function initGpu(pipelineUrl: string) {
         }
       }
     } catch (e: any) {
-      console.warn('WebGPU detector initialization failed, falling back to WASM:', e);
+      console.warn('WebGPU detector initialization failed; GPU selection will stop:', e);
       webgpuReady = false;
     }
   }
@@ -126,7 +126,7 @@ self.onmessage = async (ev: MessageEvent) => {
           });
           return;
         } catch (e: any) {
-          fallback(String(e?.message || e));
+          throw e;
         }
       }
       post({ type: 'quadResult', ...backendResult({...pipeline.classifyQuad(data, m.width, m.height, m.ref, m.quad), backend:pipeline.detectorBackend}) });
@@ -137,19 +137,22 @@ self.onmessage = async (ev: MessageEvent) => {
         post({ type: 'progress', backend: 'WebGPU experimental', text: 'Detecting grass via WebGPU (experimental)' });
         const started = performance.now();
         const progress = (text: string) => post({ type: 'progress', backend: 'WebGPU experimental', text });
+        const seedCache=new Map<number,ReturnType<typeof pipeline.featureSeeds>>();
         const result = await webgpuDetector.checked(() => runWebGpuDetection(
           webgpuDetector!, { width: m.width, height: m.height, data }, m.ref,
-          { ...detectOpts, seeds: m.seeds, featureSeeds: () => {
+          { ...detectOpts, seeds: m.seeds, featureSeeds: (trialOpts:any={}) => {
             progress('Generating native SIFT/homography seed candidates for WebGPU');
-            const features = pipeline.featureSeeds(data, m.width, m.height, m.ref, detectOpts);
+            const ratio=trialOpts.siftRatio??.68;
+            let features=seedCache.get(ratio);
+            if(!features){features=pipeline.featureSeeds(data,m.width,m.height,m.ref,{siftRatio:ratio});seedCache.set(ratio,features);}
             post({type:'log',text:'WebGPU feature proposals ('+features.featureBackend+'): '+features.seeds.length});
             return features.seeds;
           } }, progress
         ));
         if (!result || !Array.isArray(result.blocks)) throw Error('Invalid WebGPU result');
-        post({type:'result',result:{...result,backend:'WebGPU experimental (native SIFT seeds)',transportSeconds:(performance.now()-started)/1000}});
+        post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics, featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
         return;
-      } catch (e:any) { fallback(String(e?.message || e)); }
+      } catch (e:any) { throw e; }
     }
     post({ type: 'progress', backend: pipeline.detectorBackend, text: 'Detecting grass in native WASM', fraction: 0, indeterminate: true });
     const started = performance.now();
@@ -163,7 +166,7 @@ self.onmessage = async (ev: MessageEvent) => {
     }
     post({ type: 'result', result: backendResult({ ...result, transportSeconds: (performance.now() - started) / 1000 }) });
   } catch (e: any) {
-    post({ type: 'error', text: String(e?.stack || e?.message || e) });
+    post({ type: 'error', backend: normalizeBackend(m.opts?.backend)==='webgpu'?'GPU error (no WASM fallback)':pipeline.detectorBackend, text: String(e?.stack || e?.message || e) });
   } finally {
     if (ownsDetection) detecting = false;
   }

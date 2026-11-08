@@ -1,3 +1,4 @@
+import {GPU_TRIALS,mergeGpuAligned,topDownSizes} from './gpu-trials';
 import { WebGpuDetector } from './webgpu';
 
 export interface Block {
@@ -28,6 +29,8 @@ export interface DetectionResult {
   mode: string;
   seconds: number;
   backend: string;
+  diagnostics?: unknown;
+  trials?: unknown;
 }
 
 /* ---------- Linear Algebra & Geometry ---------- */
@@ -442,7 +445,7 @@ async function refineQuadsBatch(
 
   if (typeof (detector as any).refineBatch === 'function') {
     try {
-      const raw: Float32Array = await (detector as any).refineBatch(flat);
+      const raw: Float32Array = await (detector as any).refineBatch(flat, borderlineVerdicts.map(v=>v.rotation));
       if (raw && raw.length > 0) {
         if (raw.length === count * 8 || raw.length === count * 9) {
           const stride = raw.length === count * 9 ? 9 : 8;
@@ -520,7 +523,7 @@ async function refineQuadsBatch(
         }
       }
     } catch (e) {
-      console.warn('refineBatch call failed, falling back:', e);
+      throw e;
     }
   }
 
@@ -551,19 +554,6 @@ export async function verifyQuads(
   for (let i = 0; i < n; i++) {
     const v = initial[i];
     if (!v || !v.valid) continue;
-
-    // Skip subpixel refinement for quads that already satisfy full accept criteria
-    if (v.score >= accept && v.margin >= margin && v.votes === 4) {
-      out[i] = {
-        quad: quads[i],
-        valid: true,
-        rotation: v.rotation,
-        score: v.score,
-        margin: v.margin,
-        votes: v.votes,
-      };
-      continue;
-    }
 
     // Only refine quads with borderline scores
     if (v.score >= refineMin && v.margin >= refineMargin && v.votes >= refineVotes) {
@@ -855,7 +845,7 @@ export async function voxelStage(
 
 /* ---------- Main Pipeline Function ---------- */
 
-export async function runWebGpuDetection(
+export async function runSingleGpuDetection(
   detector: WebGpuDetector,
   img: { width: number; height: number; data: Uint8Array },
   ref: number[][],
@@ -892,11 +882,9 @@ export async function runWebGpuDetection(
     rawCandidates = opts.featureSeeds;
   } else if (typeof opts?.featureSeeds === 'function') {
     try {
-      const res = await opts.featureSeeds();
+      const res = await opts.featureSeeds(opts);
       if (Array.isArray(res)) rawCandidates = res;
-    } catch (e) {
-      console.warn('Failed to obtain feature seeds:', e);
-    }
+    } catch (e) { throw e; }
   } else if (Array.isArray(opts?.siftSeeds) && opts.siftSeeds.length > 0) {
     rawCandidates = opts.siftSeeds;
   } else if (typeof opts?.siftSeeds === 'function') {
@@ -906,23 +894,6 @@ export async function runWebGpuDetection(
     } catch (e) {
       console.warn('Failed to obtain sift seeds:', e);
     }
-  }
-
-  // If opts.seeds is not provided or empty, and no feature seeds from caller,
-  // return an empty result so caller/worker can fall back to native WASM.
-  if (rawCandidates.length === 0) {
-    return {
-      blocks: [],
-      seeds: [],
-      camera: null,
-      planeH: null,
-      reason: manual
-        ? 'your quad did not verify as a grass top (correlation too low). Make the corners tighter.'
-        : 'no reliable grass tile found automatically. Draw one tile quad by hand.',
-      mode: '',
-      seconds: (performance.now() - startTime) / 1000,
-      backend: 'WebGPU detector',
-    };
   }
 
   const rawSeeds = rawCandidates
@@ -971,6 +942,16 @@ export async function runWebGpuDetection(
       }
     }
     seeds = deduped;
+  }
+
+  if (!seeds.length && !manual) {
+    progress('Top-down spectral proposals: GPU correlation scan');
+    let best: {rotation:number;score:number;margin:number;votes:number;quad:number[][]} | null=null;
+    let batch:number[][][]=[];
+    const flush=async()=>{const scores=await classifyQuadsOnGpu(detector,batch);scores.forEach((v,i)=>{if(v?.valid&&v.score>.72&&(!best||v.score>best.score))best={rotation:v.rotation,score:v.score,margin:v.margin,votes:v.votes,quad:batch[i]};});batch=[];};
+    for(const n of topDownSizes(img.data,img.width,img.height)){const step=Math.max(2,Math.floor(n/32));for(let y=0;y<img.height-n;y+=step)for(let x=0;x<img.width-n;x+=step){batch.push([[x,y],[x+n,y],[x+n,y+n],[x,y+n]]);if(batch.length===512)await flush();}}
+    if(batch.length)await flush();
+    if(best && (best as any).score>=accept)seeds.push(best);
   }
 
   if (seeds.length === 0) {
@@ -1056,4 +1037,19 @@ export async function runWebGpuDetection(
     seconds: totalSeconds,
     backend: 'WebGPU detector',
   };
+}
+
+export async function runWebGpuDetection(detector:WebGpuDetector,img:{width:number;height:number;data:Uint8Array},ref:number[][],opts:any={},progress:(text:string)=>void=()=>{}):Promise<DetectionResult>{
+ const started=performance.now();
+ const automatic=!(opts.seeds?.length);
+ const configs=automatic?GPU_TRIALS:[['manual',opts] as const];
+ let first:DetectionResult|undefined,merged:Block[]=[];const trials:any[]=[];
+ for(const [name,config] of configs){
+  const trialOpts=automatic?{...opts,...config}:opts;
+  progress(`GPU trial ${trials.length+1}/${configs.length} ${name}`);
+  const result=await runSingleGpuDetection(detector,img,ref,trialOpts,text=>progress(`${name}: ${text}`));
+  if(!first){first=result;merged=result.blocks;}else merged=mergeGpuAligned(merged,result.blocks);
+  trials.push({name,tiles:result.blocks.length,seeds:result.seeds.length,mergedTiles:merged.length,seconds:result.seconds});
+ }
+ return {...first!,blocks:merged,camera:automatic?null:first!.camera,planeH:automatic?null:first!.planeH,seconds:(performance.now()-started)/1000,trials};
 }
