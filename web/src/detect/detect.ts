@@ -268,9 +268,9 @@ function makeRefiner(cv, ctx) {
 }
 function verify(ctx, quad, refine, thr, r0?) {
   let r = r0 === undefined ? classify(ctx, quad) : r0; if (!r) return null;
-  if (refine && r.score >= (thr.refineMin ?? thr.relaxed) && r.margin >= (thr.refineMargin ?? thr.acceptMargin) && r.votes >= 3) {
+  if (refine && r.score >= (thr.refineMin ?? thr.relaxed) && r.margin >= (thr.refineMargin ?? thr.acceptMargin) && r.votes >= (thr.refineVotes ?? 3)) {
     const nq = refine(quad, r.rotation);
-    if (nq && isConvex(nq) && inImage(nq, ctx.w, ctx.h) && Math.max(...nq.map((p, i) => Math.hypot(p[0] - quad[i][0], p[1] - quad[i][1]))) < 3.5) {
+    if (nq && isConvex(nq) && inImage(nq, ctx.w, ctx.h) && Math.max(...nq.map((p, i) => Math.hypot(p[0] - quad[i][0], p[1] - quad[i][1]))) < (thr.refineShift ?? 3.5)) {
       const r2 = classify(ctx, nq); if (r2 && r2.score > r.score) { quad = nq; r = r2; }
     }
   }

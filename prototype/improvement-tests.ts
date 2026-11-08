@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {DEFAULTS, makeContext, classify} from '../web/src/detect/detect';
-import {IMPROVEMENT_TRIALS,runImprovedDetection} from '../web/src/detect/improve';
+import {IMPROVEMENT_TRIALS,runImprovedDetection,mergeAligned} from '../web/src/detect/improve';
 assert.deepEqual(DEFAULTS,{accept:.88,acceptMargin:.35,relaxed:.78,coarse:.55});
 const ref=Array.from({length:16},(_,y)=>Array.from({length:16},(_,x)=>((x*73+y*97+x*y*19)%151)+20));
 // Pixel-centred expanded pixels make the sampled patch exactly one texel per cell.
@@ -19,7 +19,15 @@ assert.ok(Math.abs(after.score-score.score)<1e-6,'NCC already cancels affine bio
 assert.ok(!ctx.opts.refitPlane&&!ctx.opts.refitFlat&&!ctx.opts.siftRatio,'all new options are opt-in');
 assert.equal(IMPROVEMENT_TRIALS[0][0],'original');
 const missing=runImprovedDetection(null,image,ref);
-assert.equal(missing.trial,'original','keep original on equal support');
+assert.equal(missing.trial,'original-anchored geometric union');
 assert.equal(missing.blocks.length,0);
 assert.equal(missing.trials.length,IMPROVEMENT_TRIALS.length);
 console.log('PASS unchanged defaults, affine tint invariance, opt-in options, original-on-tie, no-cv fallback');
+
+const blocks=Array.from({length:3},(_,i)=>({x:i,y:0,z:0,rotation:i,quad:[[i*25,0],[i*25+20,0],[i*25+20,20],[i*25,20]]}));
+const incoming=[...blocks.map(b=>({...b,x:b.x-10})),{x:-7,y:0,z:0,rotation:0,quad:[[75,0],[95,0],[95,20],[75,20]]}];
+assert.equal(mergeAligned(blocks,incoming).length,4);
+assert.equal(mergeAligned(blocks,incoming)[3].x,3);
+assert.equal(mergeAligned(blocks,[...incoming.slice(0,2),incoming[3]]).length,3);
+assert.equal(mergeAligned(blocks,incoming.map((b,i)=>i===0?{...b,rotation:3}:b)).length,3);
+console.log('PASS repeated geometric registration, anchor preservation, weak/rotation-conflict rejection');

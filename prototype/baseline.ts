@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import {createRequire} from 'node:module';
 import {siftSeeds} from '../web/src/detect/sift';
+import {runImprovedDetection} from '../web/src/detect/improve';
 import {makeRefs,runDetection} from '../web/src/detect/detect';
 import * as wasm from '../web/detect-wasm';
 const [input,out,vendor,artifact]=process.argv.slice(2);
@@ -18,7 +19,8 @@ console.log('sift ready');
 await wasm.init(fs.readFileSync(artifact));
 wasm.setImage(g,f.w,f.h);wasm.setRefs(Uint8Array.from(makeRefs(f.ref).flat()));
 const t=performance.now();
-const result=runDetection(cv,{width:f.w,height:f.h,data:rgba},f.ref,JSON.parse(process.env.DETECT_OPTIONS || "{}"),console.log,
+const detect=process.env.IMPROVED ? runImprovedDetection : runDetection;
+const result=detect(cv,{width:f.w,height:f.h,data:rgba},f.ref,...(process.env.IMPROVED ? [console.log] : [JSON.parse(process.env.DETECT_OPTIONS || "{}"),console.log]),
  {classifyBatch:wasm.classifyBatch,featureSeeds:(cv,ctx,log)=>siftSeeds(sift,cv,ctx,log)});
 fs.writeFileSync(out,JSON.stringify({...result,seconds:(performance.now()-t)/1000}));
 console.log(JSON.stringify({out,seconds:(performance.now()-t)/1000,blocks:result.blocks.length}));
