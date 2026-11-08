@@ -19,7 +19,29 @@ export async function allocateEccBuffers(device:GPUDevice,descriptors:GPUBufferD
  const owned:GPUBuffer[]=[];let thrown:unknown;
  device.pushErrorScope('out-of-memory');device.pushErrorScope('validation');
  try{for(const d of descriptors)owned.push(device.createBuffer(d));}catch(e){thrown=e;}
- const validation=await device.popErrorScope(),oom=await device.popErrorScope();
+ // Pop both scopes synchronously before yielding; concurrent batches must not
+ // accidentally pop each other's device-global scope stack.
+ const validationResult=device.popErrorScope(),oomResult=device.popErrorScope();
+ const [validation,oom]=await Promise.all([validationResult,oomResult]);
  if(thrown||validation||oom){owned.forEach(b=>b.destroy());if(validation)throw Error(validation.message);if(oom||(thrown instanceof Error&&(/out.of.memory|allocation/i.test(thrown.message)||thrown.name==='GPUOutOfMemoryError')))throw new EccAllocationError(oom?.message??String(thrown));throw thrown??Error(validation?.message??'ECC allocation failed');}
  return owned;
+}
+
+// Capacity is a legal memory bound, not a throughput recommendation. Keep the
+// measured pre-regression eight-quad working set and overlap two independent
+// batches. The combined scratch allocation never exceeds the device budget.
+export function eccThroughputPolicy(capacity:number){
+ if(!Number.isSafeInteger(capacity)||capacity<1)throw Error('Invalid ECC capacity');
+ const inFlight=Math.min(2,capacity);
+ return {inFlight,batchSize:Math.min(8,Math.floor(capacity/inFlight))};
+}
+export async function runEccWindow<T>(count:number,capacity:number,run:(base:number,n:number)=>Promise<T[]>):Promise<T[]>{
+ if(!Number.isSafeInteger(count)||count<0)throw Error('Invalid ECC pending count');
+ const {inFlight,batchSize}=eccThroughputPolicy(capacity),out=new Array<T>(count);
+ let cursor=0,failure:unknown;
+ const lane=async()=>{while(cursor<count&&!failure){const base=cursor,n=Math.min(batchSize,count-base);cursor+=n;
+  try{const value=await run(base,n);if(value.length!==n)throw Error('Invalid ECC batch length');for(let i=0;i<n;i++)out[base+i]=value[i];}catch(e){failure=e;}
+ }};
+ await Promise.all(Array.from({length:Math.min(inFlight,Math.ceil(count/batchSize))},lane));
+ if(failure)throw failure;return out;
 }

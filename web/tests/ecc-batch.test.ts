@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {eccBatchCapacity,eccScratchBudget,ECC_QUAD_BYTES,EccAllocationError,withEccAllocationRetry,allocateEccBuffers} from '../src/detect/ecc-batch';
+import test from 'node:test';import assert from 'node:assert/strict';import {eccBatchCapacity,eccScratchBudget,ECC_QUAD_BYTES,EccAllocationError,withEccAllocationRetry,allocateEccBuffers,eccThroughputPolicy,runEccWindow} from '../src/detect/ecc-batch';
 const normal={maxStorageBufferBindingSize:128*1024*1024,maxBufferSize:256*1024*1024,maxComputeWorkgroupsPerDimension:65535};
 test('device-derived budget and per-binding limits scale beyond42',()=>{
  assert.equal(eccScratchBudget(normal),64*1024*1024);assert.equal(eccBatchCapacity(normal),56);
@@ -24,4 +24,13 @@ test('async OOM and validation scopes clean partial allocations, validation is n
  const d={pushErrorScope:(s:string)=>scopes.push(s),createBuffer:()=>({destroy:()=>destroyed++}),popErrorScope:async()=>{pops++;return pops===(oom?2:1)?{message:oom?'oom':'validation'}:null;}} as unknown as GPUDevice;
  await assert.rejects(allocateEccBuffers(d,[{size:4,usage:1},{size:8,usage:1}]),e=>oom?e instanceof EccAllocationError:!(e instanceof EccAllocationError));assert.equal(destroyed,2);assert.deepEqual(scopes,['out-of-memory','validation']);assert.equal(pops,2);
  }
+});
+
+test('throughput working sets share device budget and preserve reverse completion order',async()=>{
+ for(const cap of [1,2,3,8,15,16,56,454]){const p=eccThroughputPolicy(cap);assert.ok(p.batchSize*p.inFlight<=cap);assert.ok(p.batchSize<=8);}
+ const pending:{base:number;n:number;resolve:(v:number[])=>void}[]=[];let active=0,peak=0;
+ const run=runEccWindow(25,454,(base,n)=>new Promise<number[]>(resolve=>{active++;peak=Math.max(peak,active);pending.push({base,n,resolve:v=>{active--;resolve(v)}})}));
+ while(active||pending.length){const p=pending.pop()!;p.resolve(Array.from({length:p.n},(_,i)=>p.base+i));await new Promise(r=>setImmediate(r));}
+ assert.deepEqual(await run,Array.from({length:25},(_,i)=>i));assert.equal(peak,2);
+ await assert.rejects(runEccWindow(9,16,async()=>{throw Error('GPU failure');}),/GPU failure/);
 });
