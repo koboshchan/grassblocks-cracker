@@ -26,10 +26,13 @@ function startWorker() {
   const base = new URL('.', location.href).href;
   worker.onmessage = e => {
     const m = e.data;
-    if (m.type === 'ready') { ready = true; $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); busyDet(false); upd(); }
+    if (m.backend) $('#detBackend').textContent = m.backend;
+    if (m.type === 'ready') { ready = true; if (m.backend) $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); busyDet(false); upd(); }
+    else if (m.type === 'backend') { $('#detBackend').textContent = m.backend; }
     else if (m.type === 'log' || m.type === 'progress') { log(m.text); if (m.fraction != null) { $('#detBar').hidden = false; $('#detBar i').style.width = (m.fraction * 100) + '%'; } }
     else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); }
     else if (m.type === 'result') onResult(m.result);
+    else if (m.type === 'quadResult') onQuadResult(m);
   };
   worker.postMessage({ type: 'init', pipelineUrl: base + 'vendor/grass-pipeline.js' });
   setStatus('loading detector', 'busy');
@@ -37,9 +40,12 @@ function startWorker() {
 function busyDet(b: boolean) { $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
 function onResult(r: any) {
   busyDet(false); setStatus('ready', 'ok');
-  if (!r.blocks || !r.blocks.length) { log((r.reason || 'nothing found') + ' (' + (r.seconds || 0).toFixed(1) + 's, ' + r.backend + ')'); return; }
+  if (r.backend) $('#detBackend').textContent = r.backend;
+  const sec = (r.seconds ?? r.transportSeconds ?? 0).toFixed(1) + 's';
+  const be = r.backend ? ' (' + r.backend + ')' : '';
+  if (!r.blocks || !r.blocks.length) { log((r.reason || 'nothing found') + ' (' + sec + (r.backend ? ', ' + r.backend : '') + ')'); return; }
   blocks = r.blocks.map((b: any) => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: 0, include: true, score: b.score, quad: b.quad }));
-  log('found ' + blocks.length + ' faces in ' + r.seconds.toFixed(1) + 's (' + r.backend + ')'); refresh();
+  log('found ' + blocks.length + ' faces in ' + sec + be); refresh();
 }
 function runDetect(seeds?: any) {
   if (!img || !ref || !ready) return;
@@ -184,14 +190,28 @@ $('#btnRun').onclick = async () => {
 /* mode + manual single face */
 function setMode(m: string) { document.body.dataset.mode = m; $('#modeAuto').setAttribute('aria-selected', String(m === 'auto')); $('#modeManual').setAttribute('aria-selected', String(m === 'manual')); }
 $('#modeAuto').onclick = () => setMode('auto'); $('#modeManual').onclick = () => setMode('manual');
+function onQuadResult(m: any) {
+  const res = m.result ?? m;
+  const backend = m.backend || res.backend;
+  if (backend) $('#detBackend').textContent = backend;
+  const rot = (Number(res.rotation ?? 0) | 0) & 3;
+  const score = Number(res.score ?? 0);
+  const ok = Boolean(res.ok);
+  blocks.push({ x: Math.round(+$('#mx').value), y: Math.round(+$('#my').value), z: Math.round(+$('#mz').value), rotation: rot, is_side: 0, include: true, score, quad: quad.map(p => p.slice()) });
+  log('added face, rotation ' + rot + ', score ' + score.toFixed(2) + (ok && score > 0.7 ? '' : ' (weak match, check the quad corners and edit rot in the table)'));
+  quad = []; refresh();
+}
 $('#btnAddFace').onclick = () => {
   if (!img || quad.length < 4 || !worker) return;
   const cv2 = document.createElement('canvas'); cv2.width = img.width; cv2.height = img.height; const x = cv2.getContext('2d')!; x.drawImage(img as any, 0, 0); const id = x.getImageData(0, 0, cv2.width, cv2.height);
   $('#btnAddFace').disabled = true;
-  const prev = worker.onmessage!; worker.onmessage = e => { if (e.data.type === 'quadResult' || e.data.type === 'error') { worker!.onmessage = prev; const m = e.data;
-      if (m.type === 'error') { log('classify: ' + m.text); upd(); return; }
-      blocks.push({ x: Math.round(+$('#mx').value), y: Math.round(+$('#my').value), z: Math.round(+$('#mz').value), rotation: m.rotation & 3, is_side: 0, include: true, score: m.score, quad: quad.map(p => p.slice()) });
-      log('added face, rotation ' + m.rotation + ', score ' + m.score.toFixed(2) + (m.ok && m.score > 0.7 ? '' : ' (weak match, check the quad corners and edit rot in the table)')); quad = []; refresh(); } else prev.call(worker, e); };
+  const prev = worker.onmessage!; worker.onmessage = e => {
+    if (e.data.type === 'quadResult' || e.data.type === 'error') {
+      worker!.onmessage = prev; const m = e.data;
+      if (m.type === 'error') { log('classify: ' + (m.text || m.message || 'error')); upd(); return; }
+      onQuadResult(m);
+    } else prev.call(worker, e);
+  };
   worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
 };
 setMode('auto');

@@ -19,6 +19,7 @@ for(const asset of ['solver.wasm'])await cp('artifacts/'+asset,'dist/'+asset);
 for(const asset of ['grass-pipeline.js','grass-pipeline.wasm'])await access('dist/vendor/'+asset);
 try{await access('artifacts/kernel.wgsl');await cp('artifacts/kernel.wgsl','dist/kernel.wgsl');}catch{await cp('kernel.wgsl','dist/kernel.wgsl');}
 try{await access('src/detect/detect.wgsl');await cp('src/detect/detect.wgsl','dist/detect.wgsl');}catch{}
+try{await access('src/detect/ncc.wgsl');await cp('src/detect/ncc.wgsl','dist/ncc.wgsl');}catch{}
 await writeFile('dist/build-meta.json',JSON.stringify(result.metafile,null,2));
 console.log('Built single minified app.js with inline CPU worker');
 
