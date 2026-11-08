@@ -58,10 +58,12 @@ export function runImprovedDetection(cv,img,ref,progress=()=>{},hooks={}) {
   let result=null,blocks=[];
   for(const [name,opts] of IMPROVEMENT_TRIALS) {
     progress('trial '+name);
+    const started=performance.now();
     const candidate=runDetection(cv,img,ref,opts,progress,cached);
     if(!result){result=candidate;blocks=candidate.blocks;}
     else blocks=mergeAligned(blocks,candidate.blocks);
-    trials.push({name,tiles:candidate.blocks.length,mergedTiles:blocks.length,notes:candidate.notes});
+    trials.push({name,tiles:candidate.blocks.length,mergedTiles:blocks.length,seconds:(performance.now()-started)/1000,notes:candidate.notes});
+    hooks.trialComplete?.({blocks,trials:trials.slice()});
   }
   return {...result,blocks,trial:'original-anchored geometric union',trials,
     notes:[...result.notes,'Additional trials registered by repeated pixel geometry; not coordinate search.'],

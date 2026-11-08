@@ -21,7 +21,7 @@ wasm.setImage(g,f.w,f.h);wasm.setRefs(Uint8Array.from(makeRefs(f.ref).flat()));
 const t=performance.now();
 const detect=process.env.IMPROVED ? runImprovedDetection : runDetection;
 const result=detect(cv,{width:f.w,height:f.h,data:rgba},f.ref,...(process.env.IMPROVED ? [console.log] : [JSON.parse(process.env.DETECT_OPTIONS || "{}"),console.log]),
- {classifyBatch:wasm.classifyBatch,featureSeeds:(cv,ctx,log)=>siftSeeds(sift,cv,ctx,log)});
+ {trialComplete:(checkpoint)=>{const path=out+'.checkpoint.json';fs.writeFileSync(path+'.tmp',JSON.stringify(checkpoint));fs.renameSync(path+'.tmp',path);},classifyBatch:wasm.classifyBatch,featureSeeds:(cv,ctx,log)=>siftSeeds(sift,cv,ctx,log)});
 fs.writeFileSync(out,JSON.stringify({...result,seconds:(performance.now()-t)/1000}));
 console.log(JSON.stringify({out,seconds:(performance.now()-t)/1000,blocks:result.blocks.length}));
 process.exit(0);
