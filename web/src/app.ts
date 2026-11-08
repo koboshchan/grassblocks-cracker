@@ -26,7 +26,7 @@ function startWorker() {
   const base = new URL('.', location.href).href;
   worker.onmessage = e => {
     const m = e.data;
-    if (m.type === 'ready') { ready = true; $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); upd(); }
+    if (m.type === 'ready') { ready = true; $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); busyDet(false); upd(); }
     else if (m.type === 'log' || m.type === 'progress') { log(m.text); if (m.fraction != null) { $('#detBar').hidden = false; $('#detBar i').style.width = (m.fraction * 100) + '%'; } }
     else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); }
     else if (m.type === 'result') onResult(m.result);
