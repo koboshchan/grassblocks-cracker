@@ -37,3 +37,8 @@ formation*.txt
 
 __pycache__/
 *.py[cod]
+
+# Reproducible measurements belong in external run artifacts, not source control.
+prototype/benchmark-results/
+prototype/followup-results/
+prototype/improvement-results/
