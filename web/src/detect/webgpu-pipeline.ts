@@ -134,7 +134,7 @@ function jacobiEigen(S: number[][], n: number): { vals: number[]; vecs: number[]
         for (let k = 0; k < n; k++) {
           const apk = A[p][k], aqk = A[q][k];
           A[p][k] = c * apk - s * aqk;
-          A[p][k] = s * apk + c * aqk;
+          A[q][k] = s * apk + c * aqk;
         }
         for (let k = 0; k < n; k++) {
           const vkp = V[k][p], vkq = V[k][q];
@@ -947,26 +947,31 @@ export async function runWebGpuDetection(
     }
   }
 
-  seeds.sort((a, b) => b.score - a.score);
+  // Native automatic detection preserves feature order, including duplicates.
+  // planeFromSeeds resolves equal-size consensuses by first anchor, so sorting
+  // or seed NMS here changes solver coordinates. Keep manual behavior unchanged.
+  if (manual) {
+    seeds.sort((a, b) => b.score - a.score);
 
-  // Non-maximum suppression over candidate seeds
-  const deduped: typeof seeds = [];
-  for (const s of seeds) {
-    const cx = (s.quad[0][0] + s.quad[1][0] + s.quad[2][0] + s.quad[3][0]) / 4;
-    const cy = (s.quad[0][1] + s.quad[1][1] + s.quad[2][1] + s.quad[3][1]) / 4;
-    const sd = minSide(s.quad);
-    if (
-      !deduped.some(k => {
-        const kcx = (k.quad[0][0] + k.quad[1][0] + k.quad[2][0] + k.quad[3][0]) / 4;
-        const kcy = (k.quad[0][1] + k.quad[1][1] + k.quad[2][1] + k.quad[3][1]) / 4;
-        const ksd = minSide(k.quad);
-        return Math.hypot(cx - kcx, cy - kcy) < 0.5 * Math.min(sd, ksd);
-      })
-    ) {
-      deduped.push(s);
+    // Non-maximum suppression over candidate seeds
+    const deduped: typeof seeds = [];
+    for (const s of seeds) {
+      const cx = (s.quad[0][0] + s.quad[1][0] + s.quad[2][0] + s.quad[3][0]) / 4;
+      const cy = (s.quad[0][1] + s.quad[1][1] + s.quad[2][1] + s.quad[3][1]) / 4;
+      const sd = minSide(s.quad);
+      if (
+        !deduped.some(k => {
+          const kcx = (k.quad[0][0] + k.quad[1][0] + k.quad[2][0] + k.quad[3][0]) / 4;
+          const kcy = (k.quad[0][1] + k.quad[1][1] + k.quad[2][1] + k.quad[3][1]) / 4;
+          const ksd = minSide(k.quad);
+          return Math.hypot(cx - kcx, cy - kcy) < 0.5 * Math.min(sd, ksd);
+        })
+      ) {
+        deduped.push(s);
+      }
     }
+    seeds = deduped;
   }
-  seeds = deduped;
 
   if (seeds.length === 0) {
     const reason = manual

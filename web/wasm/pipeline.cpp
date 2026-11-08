@@ -26,6 +26,33 @@ struct Trial {std::string name;int tiles,mergedTiles;Timings t;};
 extern "C" {
 EMSCRIPTEN_KEEPALIVE const char*grass_result(){return output.c_str();}
 EMSCRIPTEN_KEEPALIVE int grass_classify(const unsigned char*rgba,int w,int h,const double*ref,const double*quad){try{Context c=context(rgba,w,h,ref);if(!quad)throw std::runtime_error("Missing quad");Quad q;for(int i=0;i<4;i++){if(!std::isfinite(quad[2*i])||!std::isfinite(quad[2*i+1]))throw std::runtime_error("Nonfinite quad");q[i]={quad[2*i],quad[2*i+1]};}auto r=classifyBatchNative(c,{q})[0];std::ostringstream o;o<<"{\"ok\":"<<(r.valid?"true":"false")<<',';verdict(o,r);o<<'}';output=o.str();return 0;}catch(const std::exception&e){error(e);return -1;}}
+// Feature proposals only. Verification, plane growth and voxel classification stay on GPU.
+EMSCRIPTEN_KEEPALIVE int grass_feature_seeds(const unsigned char*rgba,int w,int h,const double*ref,const double*opts){
+ try{
+  double start=clockMs();FeatureTimings timings;
+  Context c=context(rgba,w,h,ref);c.opts=options(opts);
+  std::vector<float>gf(c.g.begin(),c.g.end());
+  std::vector<Quad>seeds;const char*backend="SIFT";
+  try{
+   if(siftFailed)throw std::runtime_error("SIFT previously failed");
+   seeds=siftSeeds(gf,c.w,c.h,c.ref,c.opts.siftRatio,&timings);
+  }catch(const std::exception&){
+   backend="binary";seeds=binarySeeds(gf,c.w,c.h,c.ref,&timings);
+  }
+  std::ostringstream out;out<<"{\"seeds\":[";
+  for(size_t i=0;i<seeds.size();i++){
+   if(i)out<<',';out<<'[';
+   for(int k=0;k<4;k++){
+    if(k)out<<',';out<<'[';number(out,seeds[i][k].x);out<<',';number(out,seeds[i][k].y);out<<']';
+   }
+   out<<']';
+  }
+  out<<"],\"featureBackend\":";text(out,backend);
+  out<<",\"timingsMs\":{\"featureExtraction\":";number(out,timings.extraction);
+  out<<",\"matchingHomography\":";number(out,timings.matchingHomography);
+  out<<",\"total\":";number(out,clockMs()-start);out<<"}}";output=out.str();return 0;
+ }catch(const std::exception&e){error(e);return -1;}
+}
 EMSCRIPTEN_KEEPALIVE int grass_detect(const unsigned char*rgba,int w,int h,const double*ref,const double*opts,const double*seeds,int n,int autoFlag){try{double allStart=clockMs(),start=allStart;Context c=context(rgba,w,h,ref);Timings total;total.green=clockMs()-start;Options base=options(opts);if(n<0||n>4096||(n&&!seeds))throw std::runtime_error("Invalid seed count");std::vector<Quad>manual;for(int i=0;i<n;i++){Quad q;for(int k=0;k<4;k++){double x=seeds[i*8+k*2],y=seeds[i*8+k*2+1];if(!std::isfinite(x)||!std::isfinite(y))throw std::runtime_error("Invalid seed quad");q[k]={x,y};}manual.push_back(canonical(q));}
  std::vector<std::pair<std::string,Options>>config;Options o;if(autoFlag&&n==0){config.push_back({"original",o});o.accept=.84;o.relaxed=.72;o.margin=.30;config.push_back({"relaxed",o});o=Options{};o.refineMin=.62;o.refineMargin=.20;config.push_back({"refine",o});o.refitPlane=true;config.push_back({"refit-refine",o});o=Options{};o.siftRatio=.76;config.push_back({"ratio",o});o=Options{};o.accept=.84;o.relaxed=.72;o.margin=.30;o.refineMin=.62;o.refineMargin=.20;o.refitPlane=true;config.push_back({"combo",o});o=Options{};o.refitFlat=true;o.siftRatio=.76;config.push_back({"flat-ratio",o});o=Options{};o.refitFlat=true;o.refineMin=.55;o.refineMargin=.10;o.refineVotes=2;o.refineShift=6;config.push_back({"rescue",o});o=Options{};o.siftRatio=.80;config.push_back({"ratio80",o});}else config.push_back({"manual",base});
  std::map<double,std::vector<Quad>>cache;Result result;std::vector<Block>merged;std::vector<Trial>trials;for(auto&cfg:config){double ts=clockMs();Timings t;c.opts=cfg.second;std::vector<Quad>raw=manual;if(!n){start=clockMs();FeatureTimings ft;if(!cache.count(c.opts.siftRatio)){try{if(siftFailed)throw std::runtime_error("SIFT previously failed");std::vector<float>gf(c.g.begin(),c.g.end());cache[c.opts.siftRatio]=siftSeeds(gf,c.w,c.h,c.ref,c.opts.siftRatio,&ft);}catch(const std::exception&){siftFailed=true;try{std::vector<float>gf(c.g.begin(),c.g.end());raw=binarySeeds(gf,c.w,c.h,c.ref,&ft);}catch(const std::exception&){raw={};}}}if(cache.count(c.opts.siftRatio))raw=cache[c.opts.siftRatio];t.features=clockMs()-start;t.featureExtraction=ft.extraction;t.matchingHomography=ft.matchingHomography;}Result candidate=runDetection(c,raw,n>0,t);if(trials.empty()){result=candidate;merged=candidate.blocks;}else {double us=clockMs();merged=mergeAligned(merged,candidate.blocks);t.trialUnion+=clockMs()-us;}t.total=clockMs()-ts;trials.push_back({cfg.first,int(candidate.blocks.size()),int(merged.size()),t});total.features+=t.features;total.ecc+=t.ecc;total.latticeFallback+=t.latticeFallback;total.trialUnion+=t.trialUnion;total.featureExtraction+=t.featureExtraction;total.matchingHomography+=t.matchingHomography;total.verify+=t.verify;total.plane+=t.plane;total.voxel+=t.voxel;}

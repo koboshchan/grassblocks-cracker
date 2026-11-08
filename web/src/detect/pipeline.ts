@@ -3,6 +3,7 @@ export type PipelineModule = {
  HEAPU8: Uint8Array; HEAPF64: Float64Array;
  _malloc(n:number):number; _free(p:number):void;
  _grass_detect(p:number,w:number,h:number,r:number,o:number,s:number,n:number,a:number):number;
+ _grass_feature_seeds(p:number,w:number,h:number,r:number,o:number):number;
  _grass_classify(p:number,w:number,h:number,r:number,q:number):number;
  _grass_result():number; UTF8ToString(p:number):string;
 };
@@ -18,3 +19,7 @@ function options(opts:Record<string,unknown>={}){const supported=new Set(Object.
 function result(){const m=module(),r=JSON.parse(m.UTF8ToString(m._grass_result()));if(r.error)throw Error(r.error);return r;}
 export function classifyQuad(rgba:Uint8Array,w:number,h:number,ref:unknown,q:unknown){const m=module(),owned:number[]=[];try{const p=alloc(rgba,owned),r=alloc(reference(ref),owned),s=alloc(quad(q),owned);m._grass_classify(p,w,h,r,s);return result();}finally{owned.forEach(p=>m._free(p));}}
 export function detect(rgba:Uint8Array,w:number,h:number,ref:unknown,opts:Record<string,unknown>={},seeds:unknown[]=[]){const m=module(),owned:number[]=[];if(!Array.isArray(seeds)||seeds.length>4096)throw Error('Invalid seed list');const packed=new Float64Array(seeds.flatMap(q=>Array.from(quad(q))));const custom=Object.entries(opts).some(([key,value])=>key!=='accept'||value!==.88);try{const p=alloc(rgba,owned),r=alloc(reference(ref),owned),o=alloc(options(opts),owned),s=alloc(packed,owned);m._grass_detect(p,w,h,r,o,s,seeds.length,Number(!seeds.length&&!custom));return result();}finally{owned.forEach(p=>m._free(p));}}
+
+/** Raw SIFT/homography proposals, not native detection or verified blocks. */
+export type FeatureSeedResult={seeds:number[][][];featureBackend:string;timingsMs:{featureExtraction:number;matchingHomography:number;total:number}};
+export function featureSeeds(rgba:Uint8Array,w:number,h:number,ref:unknown,opts:Record<string,unknown>={}):FeatureSeedResult{const m=module(),owned:number[]=[];try{const p=alloc(rgba,owned),r=alloc(reference(ref),owned),o=alloc(options(opts),owned);m._grass_feature_seeds(p,w,h,r,o);return result();}finally{owned.forEach(p=>m._free(p));}}
