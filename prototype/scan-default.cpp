@@ -25,7 +25,8 @@ int main(int argc,char**argv){
   alignas(64) uint64_t values[8];_mm512_store_si512(values,vr(xz(atoi(argv[2]),atoi(argv[4])),atoi(argv[3])));
   for(auto v:values)printf("%llu ",(unsigned long long)v);puts("");return 0;
  }
- if(argc!=9){fprintf(stderr,"formation xmin xmax ymin ymax zmin zmax threads\n");return 2;}
+ if(argc!=9 && !(argc==10&&std::string(argv[9])=="--count-only")){fprintf(stderr,"formation xmin xmax ymin ymax zmin zmax threads [--count-only]\n");return 2;}
+ const bool countOnly=argc==10;
  std::ifstream f(argv[1]);std::string line;
  if(!std::getline(f,line))return 3;int count=std::stoi(line);std::vector<Block> blocks;
  while(std::getline(f,line)){std::istringstream s(line);Block b;if(s>>b.x>>b.y>>b.z>>b.r>>b.side)blocks.push_back(b);}
@@ -51,6 +52,7 @@ int main(int argc,char**argv){
       int lane=__builtin_ctz((unsigned)good);good&=good-1;bool ok=true;
       for(int j=pre;j<count;j++){auto &b=bs[j];if((rot(x+b.x,y+lane+b.y,z+b.z)&(b.side?1:3))!=unsigned(b.r)){ok=false;break;}}
       if(ok){matches++;
+       if(countOnly)continue;
        #pragma omp critical
        {printf("%d %d %d %d\n",x,y+lane,z,n);fflush(stdout);}
       }
@@ -61,5 +63,6 @@ int main(int argc,char**argv){
   tested+=uint64_t(xmax-xmin+1)*(ymax-ymin+1)*(zmax-zmin+1);
   fprintf(stderr,"north %d complete, tested %llu, seconds %.3f\n",n,(unsigned long long)tested,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());fflush(stderr);
  }
+ if(countOnly)printf("{\"tested\":%llu,\"matches\":%llu}\n",(unsigned long long)tested,(unsigned long long)matches);
  fprintf(stderr,"COMPLETE tested=%llu matches=%llu seconds=%.3f\n",(unsigned long long)tested,(unsigned long long)matches,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count());
 }

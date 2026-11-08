@@ -32,6 +32,8 @@ with tempfile.TemporaryDirectory() as tmp:
         f.write_text(str(len(blocks))+'\n'+'\n'.join(' '.join(map(str,b)) for b in blocks)+'\n')
         p=subprocess.run([exe,str(f),'-8','8','-8','8','-8','8','2'],text=True,capture_output=True,check=True)
         actual=sorted(tuple(map(int,s.split())) for s in p.stdout.splitlines())
+        counted=subprocess.run([exe,str(f),'-8','8','-8','8','-8','8','2','--count-only'],text=True,capture_output=True,check=True)
+        assert json.loads(counted.stdout)=={'tested':4*17**3,'matches':len(actual)}
         expected=[]
         for n in range(4):
             turned=[(*e.turn(bx,bz,n),by,(r+n)%4) for bx,by,bz,r,_ in blocks]
