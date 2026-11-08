@@ -75,3 +75,5 @@ a{word-break:break-word}
 .seg button{font:500 13px var(--font);border:0;background:none;color:var(--ink);padding:5px 28px;border-radius:7px;cursor:pointer;transition:background .2s,box-shadow .2s}
 .seg button[aria-selected=true]{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.18)}
 body[data-mode=auto] [data-mode=manual],body[data-mode=manual] [data-mode=auto]{display:none!important}
+
+.matches li.match{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 0}.matches .coords{white-space:pre-wrap}.matches .copy{padding:2px 10px;font-size:12px;flex:none}

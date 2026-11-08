@@ -152,6 +152,15 @@ $('#btnPause').onclick = () => {
   tick();
 };
 $('#btnCancel').onclick = () => { abort?.abort(); if (paused) { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; } };
+const FACING = ['north', 'east', 'south', 'west']; // applyNorth: (x,z)->(-z,x) per step = clockwise quarter turn
+function matchItem(m: any): HTMLElement {
+  const li = document.createElement('li'); li.className = 'match';
+  const t = document.createElement('span'); t.className = 'coords';
+  t.textContent = 'x: ' + m.x + '  y: ' + m.y + '  z: ' + m.z + '  facing ' + (FACING[m.north] ?? 'north ' + m.north);
+  const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ghost copy'; b.textContent = 'Copy /tp';
+  b.onclick = async () => { try { await navigator.clipboard.writeText('/tp @s ' + m.x + ' ' + m.y + ' ' + m.z); b.textContent = 'Copied'; } catch { b.textContent = 'Copy failed'; } setTimeout(() => b.textContent = 'Copy /tp', 1500); };
+  li.append(t, b); return li;
+}
 $('#btnRun').onclick = async () => {
   const mm = maxRes(); if (mm === null) { $('#runStats').textContent = 'Max results must be a whole number from 1 to 100000.'; return; }
   const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick WASM or use the native download below.'; return; }
@@ -163,7 +172,7 @@ $('#btnRun').onclick = async () => {
     if (!solver || solver.__be !== be) { solver?.destroy?.(); solver = null; solver = await createSolver({ backend: be }); solver.__be = be; }
     const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal, maxMatches: mm, stopOnFirst: $('#stopFirst').checked, waitIfPaused: () => pausePromise || Promise.resolve(),
       onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); tick(); const rate = p.done / Math.max(1e-6, activeMs / 1000); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
-      onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { const li = document.createElement('li'); li.textContent = JSON.stringify(m); $('#matches').appendChild(li); } } });
+      onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { $('#matches').appendChild(matchItem(m)); } } });
     tick(); $('#sMatch').textContent = String(r.matches.length);
     $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + '. ' + r.matches.length + ' match(es).';
     if (!r.cancelled && !r.stopped) $('#sPct').textContent = '100%';
