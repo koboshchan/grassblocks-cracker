@@ -2,13 +2,17 @@
 FROM debian:bookworm-slim AS wasm-toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends clang lld ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-FROM wasm-toolchain AS wasm-detection-kernel
-COPY web/detect-wasm.c .
-RUN mkdir /out && clang --target=wasm32 -O3 -msimd128 -ffp-contract=off -fno-builtin -nostdlib -Wl,--no-entry -Wl,--export-all -Wl,--initial-memory=262144 -Wl,--max-memory=536870912 -o /out/detect-wasm.wasm detect-wasm.c
-FROM emscripten/emsdk:3.1.64 AS wasm-sift
+# OpenCV and the complete detector share one Emscripten instance and memory.
+FROM emscripten/emsdk:3.1.64 AS wasm-pipeline
+RUN apt-get update && apt-get install -y --no-install-recommends cmake ninja-build curl ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
+ENV GRASS_NATIVE_BUILD=/opt/grass-native-build
+# Cache the pinned native libraries independently of detector changes.
+COPY web/wasm/build-pipeline.sh wasm/build-pipeline.sh
+RUN sh wasm/build-pipeline.sh opencv
 COPY web/wasm/ wasm/
-RUN mkdir -p public/vendor && sh wasm/build-sift.sh
+COPY web/detect-wasm.c ./
+RUN sh wasm/build-pipeline.sh link
 
 FROM wasm-toolchain AS wasm-cpu-cracker
 COPY web/solver.c .
@@ -30,12 +34,10 @@ RUN npm run build:webgpu
 
 FROM node-dependencies AS typescript-app
 COPY web/ ./
-COPY --from=wasm-detection-kernel /out/detect-wasm.wasm artifacts/detect-wasm.wasm
 COPY --from=wasm-cpu-cracker /out/solver.wasm artifacts/solver.wasm
 COPY --from=webgpu-cracker /build/artifacts/kernel.wgsl artifacts/kernel.wgsl
-COPY --from=wasm-sift /build/public/vendor/grass-sift.js public/vendor/grass-sift.js
-COPY --from=wasm-sift /build/public/vendor/grass-sift.wasm public/vendor/grass-sift.wasm
-COPY --from=node-dependencies /build/node_modules/@techstark/opencv-js/dist/opencv.js public/vendor/opencv.js
+COPY --from=wasm-pipeline /build/public/vendor/grass-pipeline.js public/vendor/grass-pipeline.js
+COPY --from=wasm-pipeline /build/public/vendor/grass-pipeline.wasm public/vendor/grass-pipeline.wasm
 RUN PREBUILT_WASM=1 npm run build && rm -f dist/build-meta.json
 
 FROM nginx:alpine AS runner
