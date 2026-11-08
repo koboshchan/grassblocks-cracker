@@ -15,6 +15,8 @@ Search uses the CURRENT WEB UI default inclusive bounds x/z -2000 through 2000 a
 
 scan-default.cpp implements the repository's exact wrapped Java hash with AVX-512 and two CPU threads in the sandbox. It does not touch the desktop GPU or any suspended desktop jobs. Before searching, all 1,024 SIMD hash outputs matched an independent Python hash oracle across random int32 x/z and negative heights. Four small all-north exhaustive searches also matched the independent scalar oracle exactly, including injected known answers. verify-candidates.cjs cross-checks every returned candidate with the unchanged production solver.wasm. No candidate is treated as screenshot ground truth merely because it satisfies the hash.
 
+All four full searches completed. Image 1 has exactly one candidate, (-525, 65, 143), north 2, satisfying all 50 observations. Image 2 has 93 candidates with its 14-tile hybrid. Image 3 has 5,816 candidates with 11 existing-detector tiles. Image 4 has 5,896 candidates with 11 hybrid tiles. Every candidate from every image passes the unchanged production WASM solver. Search times were 49.43, 49.02, 49.24 and 50.99 seconds respectively. Uniqueness applies only to these bounds and this formation, not the whole world or independent screenshot truth. Full coordinate/north lists are retained in followup-results/solver.json.
+
 Build and test the search harness on an AVX-512-capable x86 CPU.
 
 ```sh
