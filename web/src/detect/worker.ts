@@ -3,8 +3,8 @@ import * as pipeline from './pipeline';
 declare const self: DedicatedWorkerGlobalScope & { GrassPipeline?: (opts:any)=>Promise<pipeline.PipelineModule> };
 let ready=false;
 function post(m:any){self.postMessage(m);}
-async function init(opencvUrl:string){
- const url=new URL('grass-pipeline.js',opencvUrl);
+async function init(pipelineUrl:string){
+ const url=new URL(pipelineUrl);
  self.importScripts(url.href);
  if(!self.GrassPipeline)throw Error('Native WASM pipeline factory unavailable');
  const module=await self.GrassPipeline({locateFile:(name:string)=>new URL(name,url).href});
@@ -13,7 +13,7 @@ async function init(opencvUrl:string){
 self.onmessage=async(ev:MessageEvent)=>{
  const m=ev.data;
  try{
-  if(m.type==='init'){await init(m.opencvUrl);post({type:'ready',backend:pipeline.detectorBackend});return;}
+  if(m.type==='init'){await init(m.pipelineUrl || new URL('grass-pipeline.js',m.opencvUrl).href);post({type:'ready',backend:pipeline.detectorBackend});return;}
   if(m.type!=='detect'&&m.type!=='classifyQuad')return;
   if(!ready)throw Error('Native WASM detection pipeline not initialized');
   if(!Number.isSafeInteger(m.width)||!Number.isSafeInteger(m.height)||m.width<8||m.height<8||m.width*m.height>16*1024*1024||!(m.buffer instanceof ArrayBuffer)||m.buffer.byteLength!==m.width*m.height*4)

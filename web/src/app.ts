@@ -31,7 +31,7 @@ function startWorker() {
     else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); }
     else if (m.type === 'result') onResult(m.result);
   };
-  worker.postMessage({ type: 'init', opencvUrl: base + 'vendor/opencv.js', wasmUrl: base + 'detect-wasm.wasm' });
+  worker.postMessage({ type: 'init', pipelineUrl: base + 'vendor/grass-pipeline.js' });
   setStatus('loading detector', 'busy');
 }
 function busyDet(b: boolean) { $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
