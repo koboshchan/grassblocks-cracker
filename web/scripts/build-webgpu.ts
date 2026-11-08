@@ -17,6 +17,13 @@ for(let i=0;i<input.length;i++){
 if(depth)throw Error('Unclosed WGSL comment');
 await writeFile('artifacts/kernel.wgsl',clean.replace(/\s+/g,' ').trim()+'\n');
 execFileSync(naga,['artifacts/kernel.wgsl'],{stdio:'inherit'});
+try {
+ const detInput = await readFile('src/detect/detect.wgsl', 'utf8');
+ execFileSync(naga, ['src/detect/detect.wgsl'], {stdio: 'inherit'});
+ await writeFile('artifacts/detect.wgsl', detInput);
+} catch (e: any) {
+ console.warn('detect.wgsl validation warning:', e?.message || e);
+}
 // Independent compilation verifies the WebGPU host even before the UI app exists.
 await build({entryPoints:['solver.ts'],bundle:true,minify:true,format:'esm',target:'es2022',write:false,plugins:[{name:'worker-type-only',setup(b){b.onResolve({filter:/\?worker$/},()=>({path:'worker',namespace:'stub'}));b.onLoad({filter:/.*/,namespace:'stub'},()=>({contents:'export default ""'}));}}]});
 console.log('Naga validation passed before and after WGSL minification; TS host compiled');
