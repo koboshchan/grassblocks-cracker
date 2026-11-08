@@ -1,5 +1,6 @@
 /** Transport/validation only. All image and geometry algorithms run in WASM. */
 export type PipelineModule = {
+ onDetectionProgress?: (completed:number,total:number,name:string,stage:string)=>void;
  HEAPU8: Uint8Array; HEAPF64: Float64Array;
  _malloc(n:number):number; _free(p:number):void;
  _grass_detect(p:number,w:number,h:number,r:number,o:number,s:number,n:number,a:number):number;

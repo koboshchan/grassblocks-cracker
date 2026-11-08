@@ -48,6 +48,12 @@ async function init(pipelineUrl: string) {
   self.importScripts(url.href);
   if (!self.GrassPipeline) throw Error('Native WASM pipeline factory unavailable');
   const module = await self.GrassPipeline({ locateFile: (name: string) => new URL(name, url).href });
+  module.onDetectionProgress = (completed, total, name, stage) => {
+    post({ type: 'progress', backend: pipeline.detectorBackend,
+      text: 'Native WASM trial ' + Math.min(completed + (stage === 'complete' ? 0 : 1), total) +
+        '/' + total + ' (' + name + '): ' + stage,
+      fraction: completed / total, indeterminate: stage !== 'complete' });
+  };
   pipeline.setPipeline(module);
   ready = true;
 }
@@ -57,7 +63,7 @@ self.onmessage = async (ev: MessageEvent) => {
   try {
     if (m.type === 'init') {
       await init(m.pipelineUrl || new URL('grass-pipeline.js', m.opencvUrl).href);
-      post({ type: 'ready', backend: webgpuReady ? 'WebGPU detector' : pipeline.detectorBackend });
+      post({ type: 'ready', backend: pipeline.detectorBackend });
       return;
     }
     if (m.type !== 'detect' && m.type !== 'classifyQuad') return;
@@ -166,7 +172,7 @@ self.onmessage = async (ev: MessageEvent) => {
       } });
       return;
     }
-    post({ type: 'progress', text: 'Detecting grass in native WASM' });
+    post({ type: 'progress', backend: pipeline.detectorBackend, text: 'Detecting grass in native WASM', fraction: 0, indeterminate: true });
     const started = performance.now();
     const result = pipeline.detect(data, m.width, m.height, m.ref, detectOpts, m.seeds || []);
     post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });

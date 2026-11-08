@@ -54,9 +54,10 @@ async function workerHarness(gpu = true) {
   scope.self = { postMessage(m: any) { messages.push(m); }, importScripts() {}, GrassPipeline: async () => native };
   runInNewContext(built.outputFiles[0].text, scope);
   await scope.self.onmessage({ data: { type: 'init', pipelineUrl: 'https://test.invalid/vendor/grass-pipeline.js' } });
+  const readyMessage = messages.find(m => m.type === "ready");
   messages.length = 0;
   return {
-    messages, detects, features, native, candidates, scope, state,
+    messages, detects, features, native, candidates, scope, state, readyMessage,
     async detect(opts: any = { backend: 'webgpu' }, seeds: any[] = []) {
       await scope.self.onmessage({ data: {
         type: 'detect', width: 16, height: 16, buffer: new ArrayBuffer(16 * 16 * 4),
@@ -199,4 +200,30 @@ test('unspecified backend defaults to native without GPU or validation double-pa
   assert.equal(h.detects.length, 1);
   assert.equal(h.detects[0].at(-1), 1);
   assert.equal(result.parityValidation, undefined);
+});
+
+
+test('default ready label and synchronous native stage progress reflect WASM even with GPU available', async () => {
+  const h = await workerHarness(true);
+  assert.match(h.readyMessage.backend, /^WASM native pipeline/);
+  const original = h.native._grass_detect;
+  h.native._grass_detect = (...args: number[]) => {
+    const callback = (h.native as any).onDetectionProgress;
+    assert.equal(typeof callback, 'function');
+    callback(0,9,'original','features');
+    callback(0,9,'original','refining and growing');
+    callback(1,9,'original','complete');
+    return original(...args);
+  };
+  await h.detect({});
+  const progress = h.messages.filter(m => m.type === 'progress');
+  assert.equal(progress.length,4);
+  assert.ok(progress.every(m => m.backend.startsWith('WASM native pipeline')));
+  assert.equal(progress[0].indeterminate,true);
+  assert.equal(progress[1].fraction,0);
+  assert.match(progress[1].text,/trial 1\/9.*features/);
+  assert.match(progress[2].text,/refining and growing/);
+  assert.equal(progress[3].fraction,1/9);
+  assert.equal(progress[3].indeterminate,false);
+  assert.ok(h.messages.findIndex(m=>m===progress[3])<h.messages.findIndex(m=>m.type==='result'));
 });

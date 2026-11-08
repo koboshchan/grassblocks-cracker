@@ -40,7 +40,7 @@
       <div data-mode="manual"><p class="small">Click Draw tile quad, then the 4 corners of one grass-top face clockwise from top-left. Enter its grid x, height y and z, then Add face; rotation is classified from the pixels. Grow tries to find neighbours from it. Detected rows stay editable in the table.</p>
       <div class="group"><div class="line"><span>x y z</span><input id="mx" type="number" step="1" value="0" aria-label="x"><input id="mz" type="number" step="1" value="0" aria-label="z"></div><div class="opt"><span>Height y</span><input id="my" type="number" step="1" value="0"></div></div>
       <div class="row"><button id="btnAddFace" class="btn primary" disabled>Add face</button><button id="btnGrow" class="btn" disabled>Grow from quad</button></div></div>
-      <div class="bar" id="detBar" hidden><i></i></div>
+      <div class="bar" id="detBar" role="progressbar" aria-label="Detection progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i></i></div>
       <pre class="log" id="detLog" aria-live="polite"></pre>
     </section>
 

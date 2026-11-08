@@ -29,7 +29,18 @@ function startWorker() {
     if (m.backend) $('#detBackend').textContent = m.backend;
     if (m.type === 'ready') { ready = true; if (m.backend) $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); busyDet(false); upd(); }
     else if (m.type === 'backend') { $('#detBackend').textContent = m.backend; }
-    else if (m.type === 'log' || m.type === 'progress') { log(m.text); if (m.fraction != null) { $('#detBar').hidden = false; $('#detBar i').style.width = (m.fraction * 100) + '%'; } }
+    else if (m.type === 'log' || m.type === 'progress') {
+      log(m.text);
+      if (m.type === 'progress') {
+        setStatus(m.text, 'busy');
+        const bar = $('#detBar'); bar.hidden = false;
+        bar.classList.toggle('indeterminate', m.indeterminate === true || m.fraction == null);
+        if (m.fraction != null) {
+          bar.setAttribute('aria-valuenow', String(Math.round(m.fraction * 100)));
+          $('#detBar i').style.width = (m.fraction * 100) + '%';
+        }
+      }
+    }
     else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); }
     else if (m.type === 'result') onResult(m.result);
     else if (m.type === 'quadResult') onQuadResult(m);
@@ -50,7 +61,7 @@ function onResult(r: any) {
 function runDetect(seeds?: any) {
   if (!img || !ref || !ready) return;
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
-  const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; busyDet(true); setStatus('detecting', 'busy'); $('#detBar').hidden = false;
+  const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; busyDet(true); setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
   worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value) } }, [id.data.buffer]);
 }
 $('#btnAuto').onclick = () => runDetect();
