@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import * as pipeline from './pipeline';
 import {detectParallel} from './wasm-pool';
+import {normalizeBackend} from './backend-choice';
 import { WebGpuDetector } from './webgpu';
 import { runWebGpuDetection } from './webgpu-pipeline';
 
@@ -11,10 +12,32 @@ let nativeUrl = '';
 let detecting = false;
 let webgpuDetector: WebGpuDetector | null = null;
 let webgpuReady = false;
+let gpuInit: Promise<void> | null = null;
+let fallbackReason = "";
+function fallback(reason: string) {
+  fallbackReason = reason;
+  webgpuReady = false;
+  post({type:"backend", backend: pipeline.detectorBackend + " (WebGPU fallback)", fallbackReason: reason});
+  post({type:"log", text:"WebGPU fallback to WASM: " + reason});
+}
+async function chooseGpu(backend: unknown): Promise<boolean> {
+  fallbackReason = "";
+  if (normalizeBackend(backend) !== "webgpu") return false;
+  try {
+    gpuInit ??= initGpu(nativeUrl);
+    await gpuInit;
+    if (webgpuReady && webgpuDetector) return true;
+    fallback("WebGPU unavailable or initialization failed");
+  } catch (e) { fallback(String(e)); }
+  return false;
+}
+function backendResult<T extends object>(result:T):T & {fallbackReason?:string} {
+  return fallbackReason ? {...result, backend:pipeline.detectorBackend + " (WebGPU fallback)", fallbackReason} : result;
+}
 
 function post(m: any) { self.postMessage(m); }
 
-async function init(pipelineUrl: string) {
+async function initGpu(pipelineUrl: string) {
   if (typeof navigator !== 'undefined' && (navigator as any).gpu) {
     try {
       let shaderCode: string | null = null;
@@ -47,6 +70,9 @@ async function init(pipelineUrl: string) {
     }
   }
 
+}
+
+async function init(pipelineUrl: string) {
   const url = new URL(pipelineUrl);
   nativeUrl = url.href;
   self.importScripts(url.href);
@@ -64,6 +90,7 @@ async function init(pipelineUrl: string) {
 
 self.onmessage = async (ev: MessageEvent) => {
   const m = ev.data;
+  let ownsDetection = false;
   try {
     if (m.type === 'init') {
       await init(m.pipelineUrl || new URL('grass-pipeline.js', m.opencvUrl).href);
@@ -76,15 +103,21 @@ self.onmessage = async (ev: MessageEvent) => {
     if (!Number.isSafeInteger(m.width) || !Number.isSafeInteger(m.height) || m.width < 8 || m.height < 8 || m.width * m.height > 16 * 1024 * 1024 || !(m.buffer instanceof ArrayBuffer) || m.buffer.byteLength !== m.width * m.height * 4)
       throw Error('Invalid image buffer. Expected packed RGBA pixels and valid dimensions (maximum 16 megapixels).');
     const data = new Uint8Array(m.buffer);
+    const { backend, ...detectOpts } = m.opts || {};
+    detecting = true;
+    ownsDetection = true;
+    const useGpu = await chooseGpu(backend);
     if (m.type === 'classifyQuad') {
-      if (webgpuReady && webgpuDetector) {
+      if (useGpu && webgpuDetector) {
         try {
-          webgpuDetector.setImage(data, m.width, m.height);
-          webgpuDetector.setRefs(m.ref);
-          const quadArray = Array.isArray(m.quad?.[0]) ? m.quad.flat() : m.quad;
-          const res = await webgpuDetector.classifyBatch(new Float32Array(quadArray));
+          const res = await webgpuDetector.checked(async () => {
+            webgpuDetector!.setImage(data, m.width, m.height);
+            webgpuDetector!.setRefs(m.ref);
+            const quadArray = Array.isArray(m.quad?.[0]) ? m.quad.flat() : m.quad;
+            return webgpuDetector!.classifyBatch(new Float32Array(quadArray));
+          });
           post({
-            type: 'quadResult',
+            type: 'quadResult', backend: 'WebGPU experimental',
             ok: res[0] > 0.5,
             rotation: Math.round(res[1]),
             score: res[2],
@@ -93,89 +126,30 @@ self.onmessage = async (ev: MessageEvent) => {
           });
           return;
         } catch (e: any) {
-          console.warn('WebGPU classifyQuad failed, falling back to WASM:', e);
+          fallback(String(e?.message || e));
         }
       }
-      post({ type: 'quadResult', ...pipeline.classifyQuad(data, m.width, m.height, m.ref, m.quad) });
+      post({ type: 'quadResult', ...backendResult({...pipeline.classifyQuad(data, m.width, m.height, m.ref, m.quad), backend:pipeline.detectorBackend}) });
       return;
     }
-    // Backend is a worker routing option, not a native detection parameter.
-    const { backend = 'wasm', ...detectOpts } = m.opts || {};
-    let validateGpuResult: import('./webgpu-pipeline').DetectionResult | null = null;
-    let gpuSeconds = 0;
-    if (webgpuReady && webgpuDetector && backend !== 'wasm') {
+    if (useGpu && webgpuDetector) {
       try {
-        post({ type: 'progress', text: 'Detecting grass via WebGPU' });
+        post({ type: 'progress', backend: 'WebGPU experimental', text: 'Detecting grass via WebGPU (experimental)' });
         const started = performance.now();
-        const progress = (text: string) => post({ type: 'progress', text });
-        const result = await runWebGpuDetection(
-          webgpuDetector,
-          { width: m.width, height: m.height, data },
-          m.ref,
-          {
-            ...detectOpts,
-            seeds: m.seeds,
-            featureSeeds: () => {
-              progress('Generating native SIFT/homography seed candidates for WebGPU');
-              const features = pipeline.featureSeeds(data, m.width, m.height, m.ref, detectOpts);
-              post({ type: 'log', text: 'WebGPU feature proposals (' + features.featureBackend + '): ' + features.seeds.length + ', timingsMs=' + JSON.stringify(features.timingsMs) });
-              return features.seeds;
-            },
-          },
-          progress
-        );
-        if (!result || !result.blocks || result.blocks.length === 0) {
-          post({ type: 'progress', text: 'WebGPU produced 0 blocks, falling back to native WASM' });
-          post({ type: 'log', text: 'WebGPU produced 0 blocks, falling back to native WASM' });
-        } else if (Array.isArray(m.seeds) && m.seeds.length > 0) {
-          // Preserve explicit/manual-quad behavior.
-          post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });
-          return;
-        } else {
-          validateGpuResult = result;
-          gpuSeconds = (performance.now() - started) / 1000;
-        }
-      } catch (e: any) {
-        console.warn('WebGPU detection failed, falling back to native WASM:', e);
-        post({ type: 'log', text: 'WebGPU detection failed, falling back to native WASM: ' + String(e?.message || e) });
-      }
-    } else if (backend !== 'wasm' && !webgpuReady) {
-      console.warn('WebGPU detector unavailable, falling back to native WASM');
-      post({ type: 'log', text: 'WebGPU detector unavailable, falling back to native WASM' });
-    }
-    // Outside the GPU catch: failed canonical validation must fail closed.
-    if (validateGpuResult) {
-      post({ type: 'progress', text: 'Validating WebGPU output against canonical native WASM' });
-      const started = performance.now();
-      const canonical = pipeline.detect(data, m.width, m.height, m.ref, detectOpts, []);
-      const nativeValidationSeconds = (performance.now() - started) / 1000;
-      // Do not normalize translation: solver coordinates depend on the native origin.
-      const tuples = (blocks: { x: number; y: number; z: number; rotation: number }[]) =>
-        blocks.map(b => JSON.stringify([b.x, b.y, b.z, b.rotation])).sort();
-      const gpuTuples = tuples(validateGpuResult.blocks);
-      const nativeTuples = tuples(canonical.blocks);
-      const matched = gpuTuples.length === nativeTuples.length &&
-        gpuTuples.every((tuple, i) => tuple === nativeTuples[i]);
-      const mismatchReason = matched ? '' : gpuTuples.length !== nativeTuples.length
-        ? 'block count mismatch' : 'coordinate or rotation mismatch';
-      const parityValidation = {
-        matched, mismatchReason,
-        gpuBlocks: gpuTuples.length, nativeBlocks: nativeTuples.length,
-        gpuSeconds, nativeValidationSeconds,
-      };
-      const backend = matched
-        ? 'Hybrid WebGPU + native WASM parity validation'
-        : 'Native WASM fallback (WebGPU parity mismatch)';
-      post({ type: 'log', text: backend + ': ' + JSON.stringify(parityValidation) });
-      // Always return native quads, origin, ordering, trials and other metadata.
-      post({ type: 'result', result: {
-        ...canonical,
-        nativeBackend: canonical.backend,
-        backend,
-        parityValidation,
-        transportSeconds: gpuSeconds + nativeValidationSeconds,
-      } });
-      return;
+        const progress = (text: string) => post({ type: 'progress', backend: 'WebGPU experimental', text });
+        const result = await webgpuDetector.checked(() => runWebGpuDetection(
+          webgpuDetector!, { width: m.width, height: m.height, data }, m.ref,
+          { ...detectOpts, seeds: m.seeds, featureSeeds: () => {
+            progress('Generating native SIFT/homography seed candidates for WebGPU');
+            const features = pipeline.featureSeeds(data, m.width, m.height, m.ref, detectOpts);
+            post({type:'log',text:'WebGPU feature proposals ('+features.featureBackend+'): '+features.seeds.length});
+            return features.seeds;
+          } }, progress
+        ));
+        if (!result || !Array.isArray(result.blocks)) throw Error('Invalid WebGPU result');
+        post({type:'result',result:{...result,backend:'WebGPU experimental (native SIFT seeds)',transportSeconds:(performance.now()-started)/1000}});
+        return;
+      } catch (e:any) { fallback(String(e?.message || e)); }
     }
     post({ type: 'progress', backend: pipeline.detectorBackend, text: 'Detecting grass in native WASM', fraction: 0, indeterminate: true });
     const started = performance.now();
@@ -187,8 +161,10 @@ self.onmessage = async (ev: MessageEvent) => {
     } else {
       result = pipeline.detect(data,m.width,m.height,m.ref,detectOpts,m.seeds || []);
     }
-    post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });
+    post({ type: 'result', result: backendResult({ ...result, transportSeconds: (performance.now() - started) / 1000 }) });
   } catch (e: any) {
     post({ type: 'error', text: String(e?.stack || e?.message || e) });
+  } finally {
+    if (ownsDetection) detecting = false;
   }
 };

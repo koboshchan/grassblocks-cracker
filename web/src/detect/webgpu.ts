@@ -47,6 +47,25 @@ export class WebGpuDetector {
     });
   }
 
+  /** Surface async validation/device errors before returning any GPU result. */
+  async checked<T>(work: () => Promise<T>): Promise<T> {
+    if (this.destroyed) throw Error('WebGPU device unavailable');
+    const device = this.device;
+    device.pushErrorScope('internal');
+    device.pushErrorScope('out-of-memory');
+    device.pushErrorScope('validation');
+    try {
+      const lost = device.lost.then(info => { throw Error('WebGPU device lost: ' + info.message); });
+      const value = await Promise.race([work(), lost]);
+      await Promise.race([device.queue.onSubmittedWorkDone(), lost]);
+      return value;
+    } finally {
+      const errors = await Promise.all([device.popErrorScope(), device.popErrorScope(), device.popErrorScope()]);
+      const error = errors.find(Boolean);
+      if (error) throw Error('WebGPU execution failed: ' + error.message);
+    }
+  }
+
   static async isSupported(): Promise<boolean> {
     if (typeof navigator === 'undefined' || !navigator.gpu) {
       return false;

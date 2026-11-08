@@ -51,3 +51,18 @@ test('WebGpuDetector reference statistics match expected Pearson values', () => 
     assert.ok(vb[k] > 0, `Variance for rotation ${k} should be positive`);
   }
 });
+
+// No shader execution here: exercise actual async error-scope/device-loss wrapper.
+test('checked GPU execution returns only after queue completion and scope checks',async()=>{
+ const calls:string[]=[];const detector:any=Object.create(WebGpuDetector.prototype);
+ detector.destroyed=false;detector.device={lost:new Promise(()=>{}),pushErrorScope:(s:string)=>calls.push(s),popErrorScope:async()=>{calls.push('pop');return null;},queue:{onSubmittedWorkDone:async()=>{calls.push('done');}}};
+ assert.equal(await detector.checked(async()=>{calls.push('work');return 7;}),7);
+ assert.deepEqual(calls,['internal','out-of-memory','validation','work','done','pop','pop','pop']);
+});
+test('checked GPU validation and device errors reject before returning a result',async()=>{
+ const detector:any=Object.create(WebGpuDetector.prototype);detector.destroyed=false;
+ detector.device={lost:new Promise(()=>{}),pushErrorScope:()=>{},popErrorScope:async()=>({message:'invalid binding'}),queue:{onSubmittedWorkDone:async()=>{}}};
+ await assert.rejects(detector.checked(async()=>7),/invalid binding/);
+ detector.device={...detector.device,lost:Promise.resolve({message:'adapter removed'}),popErrorScope:async()=>null};
+ await assert.rejects(detector.checked(()=>new Promise(()=>{})),/adapter removed/);
+});

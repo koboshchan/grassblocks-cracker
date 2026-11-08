@@ -1,4 +1,5 @@
 // @ts-nocheck
+import {readBackend, saveBackend} from './detect/backend-choice';
 import workerSource from 'inline-worker:./detect/worker';
 import { parseFormation, formatFormation, applyNorth, FBlock } from './formation';
 import { createSolver } from '../solver';
@@ -20,14 +21,23 @@ texReady.then(() => {
   document.querySelectorAll('.swatches canvas').forEach((cv: any) => { const g = cv.getContext('2d'); g.imageSmoothingEnabled = false; g.translate(8, 8); g.rotate(Number(cv.dataset.rot) * Math.PI / 2); g.drawImage(texImg, -8, -8, 16, 16); });
 });
 
+const detectorChoice = $('#detectorChoice');
+detectorChoice.value = readBackend(() => localStorage);
+detectorChoice.onchange = () => {
+  detectorChoice.value = saveBackend(() => localStorage, detectorChoice.value);
+};
+function showBackend(m: any) {
+  if (m.backend) $('#detBackend').textContent = m.backend + (m.fallbackReason ? ': ' + m.fallbackReason : '');
+}
+
 /* worker */
 function startWorker() {
   worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })));
   const base = new URL('.', location.href).href;
   worker.onmessage = e => {
     const m = e.data;
-    if (m.backend) $('#detBackend').textContent = m.backend;
-    if (m.type === 'ready') { ready = true; if (m.backend) $('#detBackend').textContent = m.backend; setStatus('ready', 'ok'); busyDet(false); upd(); }
+    showBackend(m);
+    if (m.type === 'ready') { ready = true; showBackend(m); setStatus('ready', 'ok'); busyDet(false); upd(); }
     else if (m.type === 'backend') { $('#detBackend').textContent = m.backend; }
     else if (m.type === 'log' || m.type === 'progress') {
       log(m.text);
@@ -48,10 +58,10 @@ function startWorker() {
   worker.postMessage({ type: 'init', pipelineUrl: base + 'vendor/grass-pipeline.js' });
   setStatus('loading detector', 'busy');
 }
-function busyDet(b: boolean) { $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
+function busyDet(b: boolean) { detectorChoice.disabled = b; $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
 function onResult(r: any) {
   busyDet(false); setStatus('ready', 'ok');
-  if (r.backend) $('#detBackend').textContent = r.backend;
+  showBackend(r);
   const sec = (r.seconds ?? r.transportSeconds ?? 0).toFixed(1) + 's';
   const be = r.backend ? ' (' + r.backend + ')' : '';
   if (!r.blocks || !r.blocks.length) { log((r.reason || 'nothing found') + ' (' + sec + (r.backend ? ', ' + r.backend : '') + ')'); return; }
@@ -62,7 +72,7 @@ function runDetect(seeds?: any) {
   if (!img || !ref || !ready) return;
   const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
   const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; busyDet(true); setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
-  worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value) } }, [id.data.buffer]);
+  worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value), backend: detectorChoice.value } }, [id.data.buffer]);
 }
 $('#btnAuto').onclick = () => runDetect();
 $('#btnGrow').onclick = () => runDetect([quad.map(p => p.slice())]);
@@ -203,8 +213,7 @@ function setMode(m: string) { document.body.dataset.mode = m; $('#modeAuto').set
 $('#modeAuto').onclick = () => setMode('auto'); $('#modeManual').onclick = () => setMode('manual');
 function onQuadResult(m: any) {
   const res = m.result ?? m;
-  const backend = m.backend || res.backend;
-  if (backend) $('#detBackend').textContent = backend;
+  showBackend(res);
   const rot = (Number(res.rotation ?? 0) | 0) & 3;
   const score = Number(res.score ?? 0);
   const ok = Boolean(res.ok);
@@ -223,7 +232,7 @@ $('#btnAddFace').onclick = () => {
       onQuadResult(m);
     } else prev.call(worker, e);
   };
-  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
+  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, opts: {backend: detectorChoice.value}, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
 };
 setMode('auto');
 texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();
