@@ -100,8 +100,13 @@ self.onmessage = async (ev: MessageEvent) => {
           { ...(m.opts || {}), seeds: m.seeds },
           progress
         );
-        post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });
-        return;
+        if (!result || !result.blocks || result.blocks.length === 0) {
+          post({ type: 'progress', text: 'WebGPU produced 0 blocks, falling back to native WASM' });
+          post({ type: 'log', text: 'WebGPU produced 0 blocks, falling back to native WASM' });
+        } else {
+          post({ type: 'result', result: { ...result, transportSeconds: (performance.now() - started) / 1000 } });
+          return;
+        }
       } catch (e: any) {
         console.warn('WebGPU detection failed, falling back to native WASM:', e);
         post({ type: 'log', text: 'WebGPU detection failed, falling back to native WASM: ' + String(e?.message || e) });

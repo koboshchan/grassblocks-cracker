@@ -18,25 +18,12 @@ struct FeatureTimings {
     double matchingHomography = 0;
 };
 
-struct SiftKeypoints {
-    int count = 0;
-    std::vector<float> data;
-};
-
-// Extracts SIFT keypoints from grayscale float image buffer.
-SiftKeypoints extractFeatures(const std::vector<float>& green, int w, int h,
-                             FeatureTimings* timings = nullptr);
-
 // ref[y * 16 + x] contains the original numeric (double) reference sample.
 // Errors throw; an empty list of feature hypotheses is a successful result.
 // VLFeat's extract/get_out use shared buffers, so callers must serialize calls.
-std::vector<Quad> siftSeeds(const SiftKeypoints& features, int w, int h,
-                           const std::array<double, 256>& ref, double ratio,
-                           FeatureTimings* timings = nullptr);
 std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
                            const std::array<double, 256>& ref, double ratio,
-                           FeatureTimings* timings = nullptr,
-                           const SiftKeypoints* precomputed = nullptr);
+                           FeatureTimings* timings = nullptr);
 std::vector<Quad> binarySeeds(const std::vector<float>& green, int w, int h,
                              const std::array<double, 256>& ref,
                              FeatureTimings* timings = nullptr);

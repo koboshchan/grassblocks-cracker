@@ -395,15 +395,11 @@ export class WebGpuDetector {
     const resultByteLength = Math.max(20, count * 20);
     const resultsBuffer = this.device.createBuffer({
       size: resultByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+      usage: GPUBufferUsage.STORAGE,
     });
 
     const readQuadsBuffer = this.device.createBuffer({
       size: quadsByteLength,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-    const readResultsBuffer = this.device.createBuffer({
-      size: resultByteLength,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
@@ -431,37 +427,21 @@ export class WebGpuDetector {
       pass.end();
 
       commandEncoder.copyBufferToBuffer(quadsBuffer, 0, readQuadsBuffer, 0, count * 32);
-      commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readResultsBuffer, 0, count * 20);
       this.device.queue.submit([commandEncoder.finish()]);
 
-      await Promise.all([
-        readQuadsBuffer.mapAsync(GPUMapMode.READ),
-        readResultsBuffer.mapAsync(GPUMapMode.READ),
-      ]);
+      await readQuadsBuffer.mapAsync(GPUMapMode.READ);
       mapped = true;
 
-      const quadsView = new Float32Array(readQuadsBuffer.getMappedRange(0, count * 32));
-      const resultsView = new Float32Array(readResultsBuffer.getMappedRange(0, count * 20));
-
-      const out = new Float32Array(count * 9);
-      for (let i = 0; i < count; i++) {
-        const qOffset = i * 8;
-        const oOffset = i * 9;
-        for (let k = 0; k < 8; k++) {
-          out[oOffset + k] = quadsView[qOffset + k];
-        }
-        out[oOffset + 8] = resultsView[i * 5 + 2];
-      }
+      const out = new Float32Array(count * 8);
+      out.set(new Float32Array(readQuadsBuffer.getMappedRange(0, count * 32)));
       return out;
     } finally {
       if (mapped) {
         readQuadsBuffer.unmap();
-        readResultsBuffer.unmap();
       }
       quadsBuffer.destroy();
       resultsBuffer.destroy();
       readQuadsBuffer.destroy();
-      readResultsBuffer.destroy();
     }
   }
 

@@ -330,6 +330,32 @@ export function canonicalQuad(q: number[][]): number[][] {
   return area < 0 ? [out[0], out[3], out[2], out[1]] : out;
 }
 
+export function parseQuad(seed: any): number[][] | null {
+  if (seed && typeof seed === 'object' && 'quad' in seed) {
+    seed = (seed as any).quad;
+  }
+  if (Array.isArray(seed) || (ArrayBuffer.isView(seed) && !(seed instanceof DataView))) {
+    const s = seed as any;
+    if (s.length === 4 && Array.isArray(s[0])) {
+      return [
+        [Number(s[0][0]), Number(s[0][1])],
+        [Number(s[1][0]), Number(s[1][1])],
+        [Number(s[2][0]), Number(s[2][1])],
+        [Number(s[3][0]), Number(s[3][1])],
+      ];
+    }
+    if (s.length === 8) {
+      return [
+        [Number(s[0]), Number(s[1])],
+        [Number(s[2]), Number(s[3])],
+        [Number(s[4]), Number(s[5])],
+        [Number(s[6]), Number(s[7])],
+      ];
+    }
+  }
+  return null;
+}
+
 /* ---------- WebGPU Batch Dispatch Helper ---------- */
 
 export interface VerifyOptions {
@@ -418,7 +444,43 @@ async function refineQuadsBatch(
     try {
       const raw: Float32Array = await (detector as any).refineBatch(flat);
       if (raw && raw.length > 0) {
-        if (raw.length === count * 13) {
+        if (raw.length === count * 8 || raw.length === count * 9) {
+          const stride = raw.length === count * 9 ? 9 : 8;
+          const candidateRefined: number[][][] = [];
+          for (let i = 0; i < count; i++) {
+            const base = i * stride;
+            candidateRefined.push([
+              [raw[base + 0], raw[base + 1]],
+              [raw[base + 2], raw[base + 3]],
+              [raw[base + 4], raw[base + 5]],
+              [raw[base + 6], raw[base + 7]],
+            ]);
+          }
+          const evaluated = await classifyQuadsOnGpu(detector, candidateRefined);
+          const results: { quad: number[][]; verdict: Verdict }[] = [];
+          for (let i = 0; i < count; i++) {
+            const nq = candidateRefined[i];
+            const nv = evaluated[i];
+            const origQuad = borderlineQuads[i];
+            const origV = borderlineVerdicts[i];
+            const shift = Math.max(
+              ...nq.map((p, k) => Math.hypot(p[0] - origQuad[k][0], p[1] - origQuad[k][1]))
+            );
+            if (
+              nv &&
+              nv.valid &&
+              nv.score > origV.score &&
+              shift < refineShift &&
+              isConvex(nq) &&
+              inImage(nq, img.width, img.height)
+            ) {
+              results.push({ quad: nq, verdict: nv });
+            } else {
+              results.push({ quad: origQuad, verdict: origV });
+            }
+          }
+          return results;
+        } else if (raw.length === count * 13) {
           const results: { quad: number[][]; verdict: Verdict }[] = [];
           const verdictFirst = raw[0] <= 1 && raw[1] <= 3 && raw[4] <= 4;
           for (let i = 0; i < count; i++) {
@@ -443,40 +505,6 @@ async function refineQuadsBatch(
               ...nq.map((p, k) => Math.hypot(p[0] - origQuad[k][0], p[1] - origQuad[k][1]))
             );
             if (
-              nv.valid &&
-              nv.score > origV.score &&
-              shift < refineShift &&
-              isConvex(nq) &&
-              inImage(nq, img.width, img.height)
-            ) {
-              results.push({ quad: nq, verdict: nv });
-            } else {
-              results.push({ quad: origQuad, verdict: origV });
-            }
-          }
-          return results;
-        } else if (raw.length === count * 8) {
-          const candidateRefined: number[][][] = [];
-          for (let i = 0; i < count; i++) {
-            candidateRefined.push([
-              [raw[i * 8 + 0], raw[i * 8 + 1]],
-              [raw[i * 8 + 2], raw[i * 8 + 3]],
-              [raw[i * 8 + 4], raw[i * 8 + 5]],
-              [raw[i * 8 + 6], raw[i * 8 + 7]],
-            ]);
-          }
-          const evaluated = await classifyQuadsOnGpu(detector, candidateRefined);
-          const results: { quad: number[][]; verdict: Verdict }[] = [];
-          for (let i = 0; i < count; i++) {
-            const nq = candidateRefined[i];
-            const nv = evaluated[i];
-            const origQuad = borderlineQuads[i];
-            const origV = borderlineVerdicts[i];
-            const shift = Math.max(
-              ...nq.map((p, k) => Math.hypot(p[0] - origQuad[k][0], p[1] - origQuad[k][1]))
-            );
-            if (
-              nv &&
               nv.valid &&
               nv.score > origV.score &&
               shift < refineShift &&
@@ -623,39 +651,6 @@ export function planeFromSeeds(
   return best;
 }
 
-function generateCandidateGridQuads(w: number, h: number): number[][][] {
-  const quads: number[][][] = [];
-  const minDim = Math.min(w, h);
-  const sizes = [24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320].filter(
-    s => s < minDim * 0.7
-  );
-
-  for (const s of sizes) {
-    const step = Math.max(6, Math.floor(s / 4));
-    for (let y = 0; y <= h - s; y += step) {
-      for (let x = 0; x <= w - s; x += step) {
-        quads.push([
-          [x, y],
-          [x + s, y],
-          [x + s, y + s],
-          [x, y + s],
-        ]);
-        const halfS = s / 2;
-        const hS = Math.round(s * 0.28);
-        if (y + hS * 2 < h) {
-          quads.push([
-            [x + halfS, y],
-            [x + s, y + hS],
-            [x + halfS, y + hS * 2],
-            [x, y + hS],
-          ]);
-        }
-      }
-    }
-  }
-  return quads;
-}
-
 export async function growPlane(
   detector: WebGpuDetector,
   img: { width: number; height: number },
@@ -676,16 +671,18 @@ export async function growPlane(
 
   if (cand.length === 0) return [];
 
+  const acceptThr = opts.accept ?? accept;
+  const marginThr = opts.margin ?? margin;
   const vs = await verifyQuads(
     detector,
     cand.map(c => c.q),
     img,
-    { accept, margin, ...opts }
+    { accept: acceptThr, margin: marginThr, ...opts }
   );
   const out: Block[] = [];
   for (let i = 0; i < cand.length; i++) {
     const v = vs[i];
-    if (v && v.valid && v.score >= accept && v.margin >= margin && v.votes === 4) {
+    if (v && v.valid && v.score >= acceptThr && v.margin >= marginThr && v.votes === 4) {
       out.push({
         rotation: v.rotation,
         score: v.score,
@@ -886,62 +883,90 @@ export async function runWebGpuDetection(
   detector.setImage(img.data, img.width, img.height);
   detector.setRefs(ref);
 
+  let rawCandidates: any[] = [];
   const manual = Array.isArray(opts?.seeds) && opts.seeds.length > 0;
-  let seeds: { rotation: number; score: number; margin: number; votes: number; quad: number[][] }[] = [];
 
   if (manual) {
-    const rawSeeds = opts.seeds.map(canonicalQuad);
-    progress(`Verifying ${rawSeeds.length} manual seed(s) on GPU`);
-    const vs = await verifyQuads(detector, rawSeeds, img, verifyOpts);
-    for (let i = 0; i < rawSeeds.length; i++) {
-      const v = vs[i];
-      if (v && v.valid && v.score >= accept && v.margin >= margin && v.votes === 4) {
-        seeds.push({
-          rotation: v.rotation,
-          score: v.score,
-          margin: v.margin,
-          votes: v.votes,
-          quad: v.quad,
-        });
-      }
+    rawCandidates = opts.seeds;
+  } else if (Array.isArray(opts?.featureSeeds) && opts.featureSeeds.length > 0) {
+    rawCandidates = opts.featureSeeds;
+  } else if (typeof opts?.featureSeeds === 'function') {
+    try {
+      const res = await opts.featureSeeds();
+      if (Array.isArray(res)) rawCandidates = res;
+    } catch (e) {
+      console.warn('Failed to obtain feature seeds:', e);
     }
-  } else {
-    progress('Generating multi-scale grid candidate seeds');
-    const candQuads = generateCandidateGridQuads(img.width, img.height);
-    progress(`Classifying ${candQuads.length} candidate seeds on GPU`);
-    const vs = await verifyQuads(detector, candQuads, img, verifyOpts);
-    const verified: typeof seeds = [];
-    for (let i = 0; i < candQuads.length; i++) {
-      const v = vs[i];
-      if (v && v.valid && v.score >= accept && v.margin >= margin && v.votes === 4) {
-        verified.push({
-          rotation: v.rotation,
-          score: v.score,
-          margin: v.margin,
-          votes: v.votes,
-          quad: v.quad,
-        });
-      }
-    }
-    verified.sort((a, b) => b.score - a.score);
-
-    // Non-maximum suppression over candidate seeds
-    for (const s of verified) {
-      const cx = (s.quad[0][0] + s.quad[1][0] + s.quad[2][0] + s.quad[3][0]) / 4;
-      const cy = (s.quad[0][1] + s.quad[1][1] + s.quad[2][1] + s.quad[3][1]) / 4;
-      const sd = minSide(s.quad);
-      if (
-        !seeds.some(k => {
-          const kcx = (k.quad[0][0] + k.quad[1][0] + k.quad[2][0] + k.quad[3][0]) / 4;
-          const kcy = (k.quad[0][1] + k.quad[1][1] + k.quad[2][1] + k.quad[3][1]) / 4;
-          const ksd = minSide(k.quad);
-          return Math.hypot(cx - kcx, cy - kcy) < 0.5 * Math.min(sd, ksd);
-        })
-      ) {
-        seeds.push(s);
-      }
+  } else if (Array.isArray(opts?.siftSeeds) && opts.siftSeeds.length > 0) {
+    rawCandidates = opts.siftSeeds;
+  } else if (typeof opts?.siftSeeds === 'function') {
+    try {
+      const res = await opts.siftSeeds();
+      if (Array.isArray(res)) rawCandidates = res;
+    } catch (e) {
+      console.warn('Failed to obtain sift seeds:', e);
     }
   }
+
+  // If opts.seeds is not provided or empty, and no feature seeds from caller,
+  // return an empty result so caller/worker can fall back to native WASM.
+  if (rawCandidates.length === 0) {
+    return {
+      blocks: [],
+      seeds: [],
+      camera: null,
+      planeH: null,
+      reason: manual
+        ? 'your quad did not verify as a grass top (correlation too low). Make the corners tighter.'
+        : 'no reliable grass tile found automatically. Draw one tile quad by hand.',
+      mode: '',
+      seconds: (performance.now() - startTime) / 1000,
+      backend: 'WebGPU detector',
+    };
+  }
+
+  const rawSeeds = rawCandidates
+    .map(c => parseQuad(c))
+    .filter((q): q is number[][] => q !== null)
+    .map(canonicalQuad);
+
+  progress(`Verifying ${rawSeeds.length} seed candidate(s) on GPU`);
+  const vs = await verifyQuads(detector, rawSeeds, img, verifyOpts);
+  let seeds: { rotation: number; score: number; margin: number; votes: number; quad: number[][] }[] = [];
+
+  for (let i = 0; i < rawSeeds.length; i++) {
+    const v = vs[i];
+    if (v && v.valid && v.score >= accept && v.margin >= margin && v.votes === 4) {
+      seeds.push({
+        rotation: v.rotation,
+        score: v.score,
+        margin: v.margin,
+        votes: v.votes,
+        quad: v.quad,
+      });
+    }
+  }
+
+  seeds.sort((a, b) => b.score - a.score);
+
+  // Non-maximum suppression over candidate seeds
+  const deduped: typeof seeds = [];
+  for (const s of seeds) {
+    const cx = (s.quad[0][0] + s.quad[1][0] + s.quad[2][0] + s.quad[3][0]) / 4;
+    const cy = (s.quad[0][1] + s.quad[1][1] + s.quad[2][1] + s.quad[3][1]) / 4;
+    const sd = minSide(s.quad);
+    if (
+      !deduped.some(k => {
+        const kcx = (k.quad[0][0] + k.quad[1][0] + k.quad[2][0] + k.quad[3][0]) / 4;
+        const kcy = (k.quad[0][1] + k.quad[1][1] + k.quad[2][1] + k.quad[3][1]) / 4;
+        const ksd = minSide(k.quad);
+        return Math.hypot(cx - kcx, cy - kcy) < 0.5 * Math.min(sd, ksd);
+      })
+    ) {
+      deduped.push(s);
+    }
+  }
+  seeds = deduped;
 
   if (seeds.length === 0) {
     const reason = manual
