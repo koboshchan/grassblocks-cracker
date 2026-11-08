@@ -1,7 +1,7 @@
 // @ts-nocheck
 import {runDetection} from './detect';
 
-// Local research entry point, not wired into the deployed application.
+// Pixel-only ensemble used by browser Auto detection and research benchmarks.
 // Fixed pixel-only trials. Never select a trial using a hash/coordinate answer.
 export const IMPROVEMENT_TRIALS = [
   ['original', {}],
@@ -47,7 +47,7 @@ export function mergeAligned(original, incoming) {
   return merged;
 }
 
-export function runImprovedDetection(cv,img,ref,progress=()=>{},hooks={}) {
+export function runImprovedDetection(cv,img,ref,progress: (text: string) => void=()=>{},hooks={}) {
   const seedCache=new Map(),trials=[];
   const cached={...hooks};
   if(hooks.featureSeeds) cached.featureSeeds=(cv,ctx,log)=>{

@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 import { runDetection } from './detect';
+import { runImprovedDetection } from './improve';
 import * as wasm from '../../detect-wasm';
 import {siftSeeds} from './sift';
 
@@ -54,7 +55,13 @@ self.onmessage = async (ev: MessageEvent) => {
         catch(e) {sift=null;throw e;} // A trapping native module must not be reused.
       };
       const t0 = performance.now();
-      const r = runDetection(cv, img, m.ref, { ...(m.opts || {}), seeds: m.seeds }, (t: string) => post({ type: 'progress', text: t }), hooks);
+      // Auto uses the benchmarked pixel-only ensemble. Explicit/manual seeds and
+      // non-default thresholds retain the single-pass interactive workflow.
+      const progress = (t: string) => post({ type: 'progress', text: t });
+      const customOptions = Object.entries(m.opts || {}).some(([key, value]) => key !== 'accept' || value !== .88);
+      const r = !m.seeds?.length && !customOptions
+        ? runImprovedDetection(cv, img, m.ref, progress, hooks)
+        : runDetection(cv, img, m.ref, { ...(m.opts || {}), seeds: m.seeds }, progress, hooks);
       post({ type: 'result', result: { ...r, seconds: (performance.now() - t0) / 1000, backend: wasmOK ? wasm.detectorBackend : 'JS' } });
     }
   } catch (e: any) { post({ type: 'error', text: String(e && e.stack || e && e.message || e) }); }

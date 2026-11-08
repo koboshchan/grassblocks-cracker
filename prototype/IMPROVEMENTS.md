@@ -1,6 +1,6 @@
 Existing-detector improvement experiment
 
-Local only. The deployed detector and its defaults are unchanged. improve.ts is a separate, opt-in research entry point; nothing imports it in the application.
+Local branch and isolated preview only. Production is unchanged. The browser worker now uses improve.ts for Auto detection at the default 0.88 acceptance score. Manual seeded growth and custom acceptance scores retain the single-pass detector. The shared detector and its defaults are unchanged.
 
 The first grid-first prototype did not beat the existing detector. This experiment instead retains its SIFT seeds, dense normalized correlation, four-rotation margin checks, ECC refinement and voxel camera model.
 
@@ -22,7 +22,7 @@ prototype/check-improvement.py performs evaluation in a separate process. Labele
 
 Limits
 
-This is a deliberately expensive multi-pass prototype, not a browser-ready replacement. Trial-count inflation and the risk of an extra false observation must be weighed against candidate reduction. Runtime must include every trial, not just the fastest winning trial. No uniqueness claim extends outside inclusive web bounds x/z [-2000,2000], y [-64,320], all four norths. Returned coordinates are formation anchors, not player positions. Hill and birch have independently labeled geometry; the new screenshots do not.
+This is a deliberately expensive multi-pass preview, not a production rollout. It runs in the existing browser worker so the page remains responsive. Trial-count inflation and the risk of an extra false observation must be weighed against candidate reduction. Runtime must include every trial, not just the fastest winning trial. No uniqueness claim extends outside inclusive web bounds x/z [-2000,2000], y [-64,320], all four norths. Returned coordinates are formation anchors, not player positions. Hill and birch have independently labeled geometry; the new screenshots do not.
 
 Benchmark interpretation
 
@@ -31,3 +31,7 @@ The requested earlier 93 savanna and 5,896 lava candidates came from the earlier
 The original low-angle plains shot remains unresolved at two tops. Rejected trials can detect more visual patches there, but cannot establish the three geometric overlaps needed to safely join them to the original lattice. They are not exported merely to inflate counts.
 
 OpenCV RANSAC state advances between trials. Fresh-process ablations and the integrated, cached-seed multi-trial runner can therefore differ slightly. Integrated reruns, when available, take precedence over assembled ablation unions; the two are not falsely described as identical end-to-end timings.
+
+Isolated browser preview
+
+Run the normal web build with the existing pinned OpenCV/SIFT vendor files and prebuilt correlation/solver WASM, then serve web/dist with web/serve.py on a separate port. The server sends COOP same-origin and COEP require-corp. No detector work runs on that server. Auto detection uses the same fixed nine trials and geometric registration as the command-line benchmark. No screenshot recognition, stored formations or coordinate search is used in the detector. The Hill fixture button is still explicitly labeled as a stored fixture; testing auto detection requires opening the screenshot and clicking Auto detect.
