@@ -1,7 +1,7 @@
 import {eccBatchCapacity,ECC_QUAD_BYTES,allocateEccBuffers} from './ecc-batch';
 import {eccShader} from './ecc-shader';
 const entries=['prepare','gaussian','gradients','warp_pixels','statistics','jacobian','normal_equations','update'] as const;
-export interface EccHostTiming {count:number;passes:number;submissions:number;readbacks:number;encodeMs:number;submitToReadbackMs:number;wallMs:number;scratchBytes:number;gpuTimestampMs:null;reusedBuffers:boolean}
+export interface EccHostTiming {count:number;passes:number;dispatches:number;submissions:number;readbacks:number;encodeMs:number;submitToReadbackMs:number;wallMs:number;scratchBytes:number;gpuTimestampMs:null;reusedBuffers:boolean}
 export interface EccTrace {base:number[];warp:number[];composed:number[];rho:number;iterations:number;status:number;rotation:number;quad:number[][];lastRho:number;rhoChange:number;converged:boolean;iterationLimitReached:boolean;termination:string;maskCount:number;firstMaskCount:number;minMaskCount:number;maxMaskCount:number}
 /** No native calls. JS handles allocations and matrix input/output transport only. */
 export class BatchedGpuEcc {
@@ -54,11 +54,16 @@ export class BatchedGpuEcc {
    // Fresh WebGPU buffers start zeroed. Match that state on every reuse,
    // including failed quads whose later kernels intentionally skip writes.
    for(const buffer of [patch,pixels,jac,sums])encoder.clearBuffer(buffer);
-   const pass=(index:number,x:number,y=1)=>{const c=encoder.beginComputePass();c.setPipeline(this.pipelines[index]);c.setBindGroup(0,bind);c.dispatchWorkgroups(x,y);c.end();};
+   // WebGPU defines one usage/synchronization scope per compute dispatch,
+   // even within a single pass. Preserve every dispatch and storage dependency
+   // without reopening Metal compute encoders 303 times.
+   const compute=encoder.beginComputePass();compute.setBindGroup(0,bind);
+   const pass=(index:number,x:number,y=1)=>{compute.setPipeline(this.pipelines[index]);compute.dispatchWorkgroups(x,y);};
    pass(0,256,count);pass(1,256,count);pass(2,256,count);
    for(let iteration=0;iteration<60;iteration++){pass(3,256,count);pass(4,count,6);pass(5,256,count);pass(6,count,80);pass(7,count);}
+   compute.end();
    encoder.copyBufferToBuffer(states,0,read,0,initial.byteLength);encoder.copyBufferToBuffer(sums,0,read,initial.byteLength,count*86*4);const command=encoder.finish(),encoded=performance.now();this.device.queue.submit([command]);await read.mapAsync(GPUMapMode.READ);mapped=true;
-   this.lastHostTiming={count,passes:303,submissions:1,readbacks:1,encodeMs:encoded-encodeStart,submitToReadbackMs:performance.now()-encoded,wallMs:performance.now()-wallStart,scratchBytes:count*Object.values(ECC_QUAD_BYTES).reduce((a,b)=>a+b,0)+16,gpuTimestampMs:null,reusedBuffers};
+   this.lastHostTiming={count,passes:1,dispatches:303,submissions:1,readbacks:1,encodeMs:encoded-encodeStart,submitToReadbackMs:performance.now()-encoded,wallMs:performance.now()-wallStart,scratchBytes:count*Object.values(ECC_QUAD_BYTES).reduce((a,b)=>a+b,0)+16,gpuTimestampMs:null,reusedBuffers};
    onTiming?.(this.lastHostTiming);
    const raw=new Float32Array(read.getMappedRange()).slice();
    return quads.map((q,i)=>{const s=i*28,base=Array.from(raw.slice(s,s+9)),warp=Array.from(raw.slice(s+9,s+18));const composed=multiply(base,warp);const candidate=[[0,0],[128,0],[128,128],[0,128]].map(([x,y])=>{const d=composed[6]*x+composed[7]*y+composed[8];return [(composed[0]*x+composed[1]*y+composed[2])/d,(composed[3]*x+composed[4]*y+composed[5])/d];});return {base,warp,composed,rho:raw[s+18],iterations:raw[s+21],status:raw[s+20],lastRho:raw[s+19],rhoChange:Math.abs(raw[s+18]-raw[s+19]),converged:raw[s+23]===1,iterationLimitReached:raw[s+23]===2,termination:raw[s+20]<0?'failure':raw[s+23]===1?'epsilon':raw[s+23]===2?'iteration-limit':'unfinished',maskCount:raw[s+25],firstMaskCount:raw[s+24],minMaskCount:raw[s+26],maxMaskCount:raw[s+27],rotation:rotations[i],quad:raw[s+20]>0?candidate:q};});
