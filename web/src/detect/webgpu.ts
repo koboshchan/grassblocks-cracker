@@ -6,6 +6,7 @@ export class WebGpuDetector {
   private adapter: GPUAdapter;
   private device: GPUDevice;
   private pipeline: GPUComputePipeline;
+  private refinePipeline: GPUComputePipeline | null = null;
 
   private imageTexture: GPUTexture | null = null;
   private imageView: GPUTextureView | null = null;
@@ -19,10 +20,16 @@ export class WebGpuDetector {
 
   private destroyed = false;
 
-  private constructor(adapter: GPUAdapter, device: GPUDevice, pipeline: GPUComputePipeline) {
+  private constructor(
+    adapter: GPUAdapter,
+    device: GPUDevice,
+    pipeline: GPUComputePipeline,
+    refinePipeline: GPUComputePipeline | null = null
+  ) {
     this.adapter = adapter;
     this.device = device;
     this.pipeline = pipeline;
+    this.refinePipeline = refinePipeline;
 
     this.device.lost.then(info => {
       console.warn(`WebGPU device lost: ${info.message}`);
@@ -82,7 +89,18 @@ export class WebGpuDetector {
         },
       });
 
-      return new WebGpuDetector(adapter, device, pipeline);
+      let refinePipeline: GPUComputePipeline | null = null;
+      if (shaderCode.includes('refine_main')) {
+        refinePipeline = await device.createComputePipelineAsync({
+          layout: 'auto',
+          compute: {
+            module: shaderModule,
+            entryPoint: 'refine_main',
+          },
+        });
+      }
+
+      return new WebGpuDetector(adapter, device, pipeline, refinePipeline);
     } catch (err) {
       console.warn('Failed to create WebGpuDetector:', err);
       return null;
@@ -341,6 +359,109 @@ export class WebGpuDetector {
       quadsBuffer.destroy();
       resultsBuffer.destroy();
       readBuffer.destroy();
+    }
+  }
+
+  async refineBatch(quads: Float32Array): Promise<Float32Array> {
+    if (this.destroyed) throw new Error('WebGpuDetector is destroyed');
+    if (!this.refinePipeline) {
+      throw new Error('Refine pipeline not initialized');
+    }
+    if (!this.imageTexture || !this.imageView || !this.sampler) {
+      throw new Error('Image not set. Call setImage() before refineBatch()');
+    }
+    if (!this.refStatsBuffer || !this.refsBuffer) {
+      throw new Error('References not set. Call setRefs() before refineBatch()');
+    }
+    if (quads.length % 8 !== 0) {
+      throw new Error('Quads length must be a multiple of 8 (8 floats per quad)');
+    }
+
+    const count = quads.length / 8;
+    if (count === 0) {
+      return new Float32Array(0);
+    }
+
+    const paramsData = new Uint32Array([this.imageWidth, this.imageHeight, count, 0]);
+    this.device.queue.writeBuffer(this.paramsBuffer, 0, paramsData);
+
+    const quadsByteLength = Math.max(32, quads.byteLength);
+    const quadsBuffer = this.device.createBuffer({
+      size: quadsByteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    this.device.queue.writeBuffer(quadsBuffer, 0, quads);
+
+    const resultByteLength = Math.max(20, count * 20);
+    const resultsBuffer = this.device.createBuffer({
+      size: resultByteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    const readQuadsBuffer = this.device.createBuffer({
+      size: quadsByteLength,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    const readResultsBuffer = this.device.createBuffer({
+      size: resultByteLength,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+
+    let mapped = false;
+    try {
+      const bindGroup = this.device.createBindGroup({
+        layout: this.refinePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.paramsBuffer } },
+          { binding: 1, resource: { buffer: this.refStatsBuffer } },
+          { binding: 2, resource: { buffer: quadsBuffer } },
+          { binding: 3, resource: { buffer: resultsBuffer } },
+          { binding: 4, resource: this.imageView },
+          { binding: 5, resource: this.sampler },
+          { binding: 6, resource: { buffer: this.refsBuffer } },
+        ],
+      });
+
+      const commandEncoder = this.device.createCommandEncoder();
+      const pass = commandEncoder.beginComputePass();
+      pass.setPipeline(this.refinePipeline);
+      pass.setBindGroup(0, bindGroup);
+      const workgroupCount = Math.ceil(count / 64);
+      pass.dispatchWorkgroups(workgroupCount, 1, 1);
+      pass.end();
+
+      commandEncoder.copyBufferToBuffer(quadsBuffer, 0, readQuadsBuffer, 0, count * 32);
+      commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readResultsBuffer, 0, count * 20);
+      this.device.queue.submit([commandEncoder.finish()]);
+
+      await Promise.all([
+        readQuadsBuffer.mapAsync(GPUMapMode.READ),
+        readResultsBuffer.mapAsync(GPUMapMode.READ),
+      ]);
+      mapped = true;
+
+      const quadsView = new Float32Array(readQuadsBuffer.getMappedRange(0, count * 32));
+      const resultsView = new Float32Array(readResultsBuffer.getMappedRange(0, count * 20));
+
+      const out = new Float32Array(count * 9);
+      for (let i = 0; i < count; i++) {
+        const qOffset = i * 8;
+        const oOffset = i * 9;
+        for (let k = 0; k < 8; k++) {
+          out[oOffset + k] = quadsView[qOffset + k];
+        }
+        out[oOffset + 8] = resultsView[i * 5 + 2];
+      }
+      return out;
+    } finally {
+      if (mapped) {
+        readQuadsBuffer.unmap();
+        readResultsBuffer.unmap();
+      }
+      quadsBuffer.destroy();
+      resultsBuffer.destroy();
+      readQuadsBuffer.destroy();
+      readResultsBuffer.destroy();
     }
   }
 

@@ -63,7 +63,7 @@ for unit in sift vlfeat/vl/sift vlfeat/vl/imopv vlfeat/vl/mathop vlfeat/vl/gener
     "$WEB_DIR/wasm/$unit.c" -o "$OBJECTS/$name.o"
 done
 for unit in pipeline geometry features; do
-  em++ -c -std=c++17 -O3 -ffp-contract=off -fexceptions \
+  em++ -c -std=c++17 -O3 -msimd128 -ffp-contract=off -fexceptions \
     -I"$PREFIX/include/opencv4" -I"$WEB_DIR/wasm" \
     "$WEB_DIR/wasm/$unit.cpp" -o "$OBJECTS/$unit.o"
 done

@@ -10,6 +10,11 @@
 #include <opencv2/features2d.hpp>
 #include <opencv2/imgproc.hpp>
 
+#if defined(__wasm_simd128__)
+#include <wasm_simd128.h>
+using wasm_v128_t = v128_t;
+#endif
+
 extern "C" {
 int extract(float* image, int width, int height);
 float* get_out();
@@ -86,12 +91,7 @@ PreparedImage prepareImage(const std::vector<float>& green, int w, int h) {
     return image;
 }
 
-struct SiftFeatures {
-    int count;
-    std::vector<float> data;
-};
-
-SiftFeatures features(const std::vector<float>& green, int w, int h) {
+SiftKeypoints features(const std::vector<float>& green, int w, int h) {
     auto image = prepareImage(green, w, h);
     const int count = extract(image.data.data(), image.width, image.height);
     if (count < 0 || count > 20000)
@@ -99,7 +99,7 @@ SiftFeatures features(const std::vector<float>& green, int w, int h) {
     const float* output = get_out();
     if (!output && count)
         throw std::runtime_error("Invalid SIFT result buffer");
-    SiftFeatures result{count, {}};
+    SiftKeypoints result{count, {}};
     // Copy now: the next extract call overwrites the C static output buffer.
     if (count) result.data.assign(output, output + count * FeatureStride);
     for (int i = 0; i < count; ++i) {
@@ -110,6 +110,18 @@ SiftFeatures features(const std::vector<float>& green, int w, int h) {
     }
     return result;
 }
+
+// Static cache for reference texture features to extract only once.
+static std::array<double, 256> s_cachedRef{};
+static SiftKeypoints s_cachedRefFeatures;
+static bool s_hasCachedRef = false;
+
+// Static cache for image features across siftSeeds calls when precomputed is not passed.
+static int s_cachedImgW = 0;
+static int s_cachedImgH = 0;
+static std::vector<float> s_cachedImgGreen;
+static SiftKeypoints s_cachedImgFeatures;
+static bool s_hasCachedImg = false;
 
 double signedAreaTwice(const Quad& q) {
     double area = 0;
@@ -202,20 +214,53 @@ unsigned char jsUint8(double value) {
 }
 } // namespace
 
-std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
+SiftKeypoints extractFeatures(const std::vector<float>& green, int w, int h,
+                             FeatureTimings* timings) {
+    PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
+    return features(green, w, h);
+}
+
+std::vector<Quad> siftSeeds(const SiftKeypoints& features, int w, int h,
                            const std::array<double, 256>& ref, double ratio,
                            FeatureTimings* timings) {
+    return siftSeeds(std::vector<float>{}, w, h, ref, ratio, timings, &features);
+}
+
+std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
+                           const std::array<double, 256>& ref, double ratio,
+                           FeatureTimings* timings,
+                           const SiftKeypoints* precomputed) {
     if (!std::isfinite(ratio))
         throw std::invalid_argument("Invalid SIFT ratio");
-    PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
     constexpr int S = 256;
-    std::vector<float> texture(S * S);
-    for (int y = 0; y < S; ++y)
-        for (int x = 0; x < S; ++x)
-            texture[y * S + x] = static_cast<float>(ref[(y / 16) * 16 + x / 16]);
-    const auto a = features(texture, S, S);
-    const auto b = features(green, w, h);
-    extractionTimer.stop();
+    if (!s_hasCachedRef || s_cachedRef != ref) {
+        PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
+        std::vector<float> texture(S * S);
+        for (int y = 0; y < S; ++y)
+            for (int x = 0; x < S; ++x)
+                texture[y * S + x] = static_cast<float>(ref[(y / 16) * 16 + x / 16]);
+        s_cachedRefFeatures = features(texture, S, S);
+        s_cachedRef = ref;
+        s_hasCachedRef = true;
+    }
+    const SiftKeypoints& a = s_cachedRefFeatures;
+
+    const SiftKeypoints* bPtr = precomputed;
+    if (!bPtr) {
+        if (s_hasCachedImg && s_cachedImgW == w && s_cachedImgH == h && s_cachedImgGreen == green) {
+            bPtr = &s_cachedImgFeatures;
+        } else {
+            PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
+            s_cachedImgFeatures = features(green, w, h);
+            s_cachedImgGreen = green;
+            s_cachedImgW = w;
+            s_cachedImgH = h;
+            s_hasCachedImg = true;
+            bPtr = &s_cachedImgFeatures;
+        }
+    }
+    const SiftKeypoints& b = *bPtr;
+
     PhaseTimer matchingTimer(timings && b.count > 0 ? &timings->matchingHomography : nullptr);
     std::vector<cv::Point2f> P, Q;
     for (int i = 0; i < b.count; ++i) {
@@ -226,6 +271,26 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
         for (int j = 0; j < a.count; ++j) {
             const int aj = j * FeatureStride + 2;
             double distance = 0;
+#if defined(__wasm_simd128__)
+            for (int k = 0; k < 128; k += 8) {
+                const wasm_v128_t vb0 = wasm_v128_load(&b.data[bi + k]);
+                const wasm_v128_t va0 = wasm_v128_load(&a.data[aj + k]);
+                const wasm_v128_t diff0 = wasm_f32x4_sub(vb0, va0);
+                const wasm_v128_t sq0 = wasm_f32x4_mul(diff0, diff0);
+
+                const wasm_v128_t vb1 = wasm_v128_load(&b.data[bi + k + 4]);
+                const wasm_v128_t va1 = wasm_v128_load(&a.data[aj + k + 4]);
+                const wasm_v128_t diff1 = wasm_f32x4_sub(vb1, va1);
+                const wasm_v128_t sq1 = wasm_f32x4_mul(diff1, diff1);
+
+                const wasm_v128_t sum8 = wasm_f32x4_add(sq0, sq1);
+                distance += static_cast<double>(wasm_f32x4_extract_lane(sum8, 0)) +
+                            static_cast<double>(wasm_f32x4_extract_lane(sum8, 1)) +
+                            static_cast<double>(wasm_f32x4_extract_lane(sum8, 2)) +
+                            static_cast<double>(wasm_f32x4_extract_lane(sum8, 3));
+                if (distance >= second) break;
+            }
+#else
             for (int k = 0; k < 128; ++k) {
                 // JS converts both Float32 samples to double BEFORE subtracting.
                 const double v = static_cast<double>(b.data[bi + k]) -
@@ -233,6 +298,7 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
                 distance += v * v;
                 if (distance >= second) break;
             }
+#endif
             if (distance < best) {
                 second = best;
                 best = distance;

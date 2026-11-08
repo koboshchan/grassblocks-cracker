@@ -332,6 +332,25 @@ export function canonicalQuad(q: number[][]): number[][] {
 
 /* ---------- WebGPU Batch Dispatch Helper ---------- */
 
+export interface VerifyOptions {
+  accept?: number;
+  margin?: number;
+  relaxed?: number;
+  refineMin?: number;
+  refineMargin?: number;
+  refineVotes?: number;
+  refineShift?: number;
+}
+
+export interface VerifiedQuad {
+  quad: number[][];
+  valid: boolean;
+  rotation: number;
+  score: number;
+  margin: number;
+  votes: number;
+}
+
 async function classifyQuadsOnGpu(
   detector: WebGpuDetector,
   quads: number[][][]
@@ -349,7 +368,8 @@ async function classifyQuadsOnGpu(
     }
   }
 
-  const CHUNK_SIZE = 16384;
+  // Large batch dispatch to minimize round trips between host and GPU
+  const CHUNK_SIZE = 131072;
   const results: (Verdict | null)[] = new Array(n);
 
   for (let offset = 0; offset < n; offset += CHUNK_SIZE) {
@@ -373,6 +393,191 @@ async function classifyQuadsOnGpu(
   }
 
   return results;
+}
+
+async function refineQuadsBatch(
+  detector: WebGpuDetector,
+  borderlineQuads: number[][][],
+  borderlineVerdicts: Verdict[],
+  img: { width: number; height: number },
+  refineShift: number
+): Promise<{ quad: number[][]; verdict: Verdict }[]> {
+  const count = borderlineQuads.length;
+  if (count === 0) return [];
+
+  const flat = new Float32Array(count * 8);
+  for (let i = 0; i < count; i++) {
+    const q = borderlineQuads[i];
+    for (let k = 0; k < 4; k++) {
+      flat[i * 8 + k * 2] = q[k][0];
+      flat[i * 8 + k * 2 + 1] = q[k][1];
+    }
+  }
+
+  if (typeof (detector as any).refineBatch === 'function') {
+    try {
+      const raw: Float32Array = await (detector as any).refineBatch(flat);
+      if (raw && raw.length > 0) {
+        if (raw.length === count * 13) {
+          const results: { quad: number[][]; verdict: Verdict }[] = [];
+          const verdictFirst = raw[0] <= 1 && raw[1] <= 3 && raw[4] <= 4;
+          for (let i = 0; i < count; i++) {
+            const vOffset = i * 13 + (verdictFirst ? 0 : 8);
+            const qOffset = i * 13 + (verdictFirst ? 5 : 0);
+            const nq: number[][] = [
+              [raw[qOffset + 0], raw[qOffset + 1]],
+              [raw[qOffset + 2], raw[qOffset + 3]],
+              [raw[qOffset + 4], raw[qOffset + 5]],
+              [raw[qOffset + 6], raw[qOffset + 7]],
+            ];
+            const nv: Verdict = {
+              valid: raw[vOffset + 0] > 0.5,
+              rotation: Math.round(raw[vOffset + 1]),
+              score: raw[vOffset + 2],
+              margin: raw[vOffset + 3],
+              votes: Math.round(raw[vOffset + 4]),
+            };
+            const origQuad = borderlineQuads[i];
+            const origV = borderlineVerdicts[i];
+            const shift = Math.max(
+              ...nq.map((p, k) => Math.hypot(p[0] - origQuad[k][0], p[1] - origQuad[k][1]))
+            );
+            if (
+              nv.valid &&
+              nv.score > origV.score &&
+              shift < refineShift &&
+              isConvex(nq) &&
+              inImage(nq, img.width, img.height)
+            ) {
+              results.push({ quad: nq, verdict: nv });
+            } else {
+              results.push({ quad: origQuad, verdict: origV });
+            }
+          }
+          return results;
+        } else if (raw.length === count * 8) {
+          const candidateRefined: number[][][] = [];
+          for (let i = 0; i < count; i++) {
+            candidateRefined.push([
+              [raw[i * 8 + 0], raw[i * 8 + 1]],
+              [raw[i * 8 + 2], raw[i * 8 + 3]],
+              [raw[i * 8 + 4], raw[i * 8 + 5]],
+              [raw[i * 8 + 6], raw[i * 8 + 7]],
+            ]);
+          }
+          const evaluated = await classifyQuadsOnGpu(detector, candidateRefined);
+          const results: { quad: number[][]; verdict: Verdict }[] = [];
+          for (let i = 0; i < count; i++) {
+            const nq = candidateRefined[i];
+            const nv = evaluated[i];
+            const origQuad = borderlineQuads[i];
+            const origV = borderlineVerdicts[i];
+            const shift = Math.max(
+              ...nq.map((p, k) => Math.hypot(p[0] - origQuad[k][0], p[1] - origQuad[k][1]))
+            );
+            if (
+              nv &&
+              nv.valid &&
+              nv.score > origV.score &&
+              shift < refineShift &&
+              isConvex(nq) &&
+              inImage(nq, img.width, img.height)
+            ) {
+              results.push({ quad: nq, verdict: nv });
+            } else {
+              results.push({ quad: origQuad, verdict: origV });
+            }
+          }
+          return results;
+        }
+      }
+    } catch (e) {
+      console.warn('refineBatch call failed, falling back:', e);
+    }
+  }
+
+  return borderlineQuads.map((q, i) => ({ quad: q, verdict: borderlineVerdicts[i] }));
+}
+
+export async function verifyQuads(
+  detector: WebGpuDetector,
+  quads: number[][][],
+  img: { width: number; height: number },
+  opts: VerifyOptions = {}
+): Promise<(VerifiedQuad | null)[]> {
+  const n = quads.length;
+  if (n === 0) return [];
+
+  const accept = opts.accept ?? 0.88;
+  const margin = opts.margin ?? 0.35;
+  const relaxed = opts.relaxed ?? 0.78;
+  const refineMin = opts.refineMin !== undefined ? opts.refineMin : relaxed;
+  const refineMargin = opts.refineMargin !== undefined ? opts.refineMargin : margin;
+  const refineVotes = opts.refineVotes !== undefined ? opts.refineVotes : 3;
+  const refineShift = opts.refineShift !== undefined ? opts.refineShift : 3.5;
+
+  const initial = await classifyQuadsOnGpu(detector, quads);
+  const out: (VerifiedQuad | null)[] = new Array(n).fill(null);
+  const borderlineIndices: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const v = initial[i];
+    if (!v || !v.valid) continue;
+
+    // Skip subpixel refinement for quads that already satisfy full accept criteria
+    if (v.score >= accept && v.margin >= margin && v.votes === 4) {
+      out[i] = {
+        quad: quads[i],
+        valid: true,
+        rotation: v.rotation,
+        score: v.score,
+        margin: v.margin,
+        votes: v.votes,
+      };
+      continue;
+    }
+
+    // Only refine quads with borderline scores
+    if (v.score >= refineMin && v.margin >= refineMargin && v.votes >= refineVotes) {
+      borderlineIndices.push(i);
+    } else {
+      out[i] = {
+        quad: quads[i],
+        valid: true,
+        rotation: v.rotation,
+        score: v.score,
+        margin: v.margin,
+        votes: v.votes,
+      };
+    }
+  }
+
+  // Refine borderline quads via batched GPU dispatch
+  if (borderlineIndices.length > 0) {
+    const borderlineQuads = borderlineIndices.map(idx => quads[idx]);
+    const borderlineVerdicts = borderlineIndices.map(idx => initial[idx]!);
+    const refined = await refineQuadsBatch(
+      detector,
+      borderlineQuads,
+      borderlineVerdicts,
+      img,
+      refineShift
+    );
+    for (let b = 0; b < borderlineIndices.length; b++) {
+      const idx = borderlineIndices[b];
+      const r = refined[b];
+      out[idx] = {
+        quad: r.quad,
+        valid: r.verdict.valid,
+        rotation: r.verdict.rotation,
+        score: r.verdict.score,
+        margin: r.verdict.margin,
+        votes: r.verdict.votes,
+      };
+    }
+  }
+
+  return out;
 }
 
 /* ---------- Pipeline Stages ---------- */
@@ -457,7 +662,8 @@ export async function growPlane(
   H: number[],
   range: number,
   accept: number,
-  margin: number
+  margin: number,
+  opts: VerifyOptions = {}
 ): Promise<Block[]> {
   const cand: { q: number[][]; x: number; z: number }[] = [];
   for (let z = -range; z <= range; z++) {
@@ -470,9 +676,11 @@ export async function growPlane(
 
   if (cand.length === 0) return [];
 
-  const vs = await classifyQuadsOnGpu(
+  const vs = await verifyQuads(
     detector,
-    cand.map(c => c.q)
+    cand.map(c => c.q),
+    img,
+    { accept, margin, ...opts }
   );
   const out: Block[] = [];
   for (let i = 0; i < cand.length; i++) {
@@ -483,7 +691,7 @@ export async function growPlane(
         score: v.score,
         margin: v.margin,
         votes: v.votes,
-        quad: cand[i].q,
+        quad: v.quad,
         x: cand[i].x,
         y: 0,
         z: cand[i].z,
@@ -497,7 +705,16 @@ export async function voxelStage(
   detector: WebGpuDetector,
   img: { width: number; height: number },
   planeH: number[],
-  opts: { relaxed: number; margin: number; refitFlat: boolean },
+  opts: {
+    relaxed: number;
+    margin: number;
+    refitFlat: boolean;
+    accept?: number;
+    refineMin?: number;
+    refineMargin?: number;
+    refineVotes?: number;
+    refineShift?: number;
+  },
   progress: (t: string) => void
 ): Promise<{ blocks: Block[]; P: number[]; heights: number[] } | { reason: string }> {
   const cam = cameraFromPlane(planeH, img.width, img.height);
@@ -527,9 +744,20 @@ export async function voxelStage(
 
     if (cand.length === 0) break;
 
-    const vs = await classifyQuadsOnGpu(
+    // Single large GPU dispatch across candidate quads in the 3D grid
+    const vs = await verifyQuads(
       detector,
-      cand.map(c => c.q)
+      cand.map(c => c.q),
+      img,
+      {
+        accept: opts.accept ?? 0.88,
+        margin: opts.margin,
+        relaxed: opts.relaxed,
+        refineMin: opts.refineMin,
+        refineMargin: opts.refineMargin,
+        refineVotes: opts.refineVotes,
+        refineShift: opts.refineShift,
+      }
     );
     const accept: Block[] = [];
     for (let i = 0; i < cand.length; i++) {
@@ -540,7 +768,7 @@ export async function voxelStage(
           score: v.score,
           margin: v.margin,
           votes: v.votes,
-          quad: cand[i].q,
+          quad: v.quad,
           x: cand[i].x,
           y: cand[i].y,
           z: cand[i].z,
@@ -644,6 +872,15 @@ export async function runWebGpuDetection(
   const relaxed = opts?.relaxed ?? 0.78;
   const refitPlane = !!opts?.refitPlane;
   const refitFlat = !!opts?.refitFlat;
+  const verifyOpts: VerifyOptions = {
+    accept,
+    margin,
+    relaxed,
+    refineMin: opts?.refineMin,
+    refineMargin: opts?.refineMargin,
+    refineVotes: opts?.refineVotes,
+    refineShift: opts?.refineShift,
+  };
 
   progress('Initializing WebGPU detector image and reference patterns');
   detector.setImage(img.data, img.width, img.height);
@@ -655,7 +892,7 @@ export async function runWebGpuDetection(
   if (manual) {
     const rawSeeds = opts.seeds.map(canonicalQuad);
     progress(`Verifying ${rawSeeds.length} manual seed(s) on GPU`);
-    const vs = await classifyQuadsOnGpu(detector, rawSeeds);
+    const vs = await verifyQuads(detector, rawSeeds, img, verifyOpts);
     for (let i = 0; i < rawSeeds.length; i++) {
       const v = vs[i];
       if (v && v.valid && v.score >= accept && v.margin >= margin && v.votes === 4) {
@@ -664,7 +901,7 @@ export async function runWebGpuDetection(
           score: v.score,
           margin: v.margin,
           votes: v.votes,
-          quad: rawSeeds[i],
+          quad: v.quad,
         });
       }
     }
@@ -672,7 +909,7 @@ export async function runWebGpuDetection(
     progress('Generating multi-scale grid candidate seeds');
     const candQuads = generateCandidateGridQuads(img.width, img.height);
     progress(`Classifying ${candQuads.length} candidate seeds on GPU`);
-    const vs = await classifyQuadsOnGpu(detector, candQuads);
+    const vs = await verifyQuads(detector, candQuads, img, verifyOpts);
     const verified: typeof seeds = [];
     for (let i = 0; i < candQuads.length; i++) {
       const v = vs[i];
@@ -682,7 +919,7 @@ export async function runWebGpuDetection(
           score: v.score,
           margin: v.margin,
           votes: v.votes,
-          quad: candQuads[i],
+          quad: v.quad,
         });
       }
     }
@@ -738,7 +975,7 @@ export async function runWebGpuDetection(
   }
 
   progress(`Growing ${plane.ids.length} coplanar seed(s) across the ground plane`);
-  let blocks = await growPlane(detector, img, plane.H, 28, accept, margin);
+  let blocks = await growPlane(detector, img, plane.H, 28, accept, margin, verifyOpts);
   let mode = 'planar lattice (all y=0)';
   let camera: number[] | null = null;
 
@@ -754,7 +991,7 @@ export async function runWebGpuDetection(
       }
       const H = homography(src, dst);
       if (!H) break;
-      const next = await growPlane(detector, img, H, 28, accept, margin);
+      const next = await growPlane(detector, img, H, 28, accept, margin, verifyOpts);
       if (next.length <= blocks.length) break;
       blocks = next;
       plane.H = H;
@@ -763,7 +1000,13 @@ export async function runWebGpuDetection(
   }
 
   progress('Trying 3D voxel lattice for other heights');
-  const v = await voxelStage(detector, img, plane.H, { relaxed, margin, refitFlat }, progress);
+  const v = await voxelStage(
+    detector,
+    img,
+    plane.H,
+    { relaxed, margin, refitFlat, ...verifyOpts },
+    progress
+  );
   if ('blocks' in v && v.blocks && v.blocks.length >= blocks.length) {
     blocks = v.blocks;
     mode = `3D voxel lattice (heights ${v.heights.join(',')})`;
