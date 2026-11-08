@@ -53,7 +53,7 @@ export function siftSeeds(s: any, cv: any, ctx: any, log = (_: string) => {}) {
    if(d < best) { second = best; best = d; jbest = j; }
    else if(d < second) second = d;
   }
-  if(best < 0.68 * 0.68 * second) { P.push([a.a[jbest*130],a.a[jbest*130+1]]); Q.push([b.a[i*130],b.a[i*130+1]]); }
+  if(best < (ctx.opts.siftRatio ?? 0.68) ** 2 * second) { P.push([a.a[jbest*130],a.a[jbest*130+1]]); Q.push([b.a[i*130],b.a[i*130+1]]); }
  }
  log(`SIFT: ${P.length} ratio-test matches`);
  const found:number[][][]=[];

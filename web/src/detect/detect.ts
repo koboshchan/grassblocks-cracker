@@ -268,7 +268,7 @@ function makeRefiner(cv, ctx) {
 }
 function verify(ctx, quad, refine, thr, r0?) {
   let r = r0 === undefined ? classify(ctx, quad) : r0; if (!r) return null;
-  if (refine && r.score >= thr.relaxed && r.margin >= thr.acceptMargin && r.votes >= 3) {
+  if (refine && r.score >= (thr.refineMin ?? thr.relaxed) && r.margin >= (thr.refineMargin ?? thr.acceptMargin) && r.votes >= 3) {
     const nq = refine(quad, r.rotation);
     if (nq && isConvex(nq) && inImage(nq, ctx.w, ctx.h) && Math.max(...nq.map((p, i) => Math.hypot(p[0] - quad[i][0], p[1] - quad[i][1]))) < 3.5) {
       const r2 = classify(ctx, nq); if (r2 && r2.score > r.score) { quad = nq; r = r2; }
@@ -363,8 +363,22 @@ export function voxelStage(ctx, seeds, plane, refine, progress?) {
     heights = [...new Set(kept.map(b => b.y))].sort((a, b) => a - b);
     log('3D round ' + (round + 1) + ': ' + cand.length + ' voxel faces tested, ' + kept.length + ' accepted over ' + heights.length + ' height level(s)');
     if (!best || kept.length > best.blocks.length) best = { blocks: kept, P, heights };
-    if (kept.length <= prevCount || heights.length < 2 || kept.length < 6) break;
+    if (kept.length <= prevCount || kept.length < (ctx.opts.refitFlat && heights.length === 1 ? 3 : 6)) break;
     prevCount = kept.length;
+    if (heights.length === 1) {
+      if (!ctx.opts.refitFlat) break;
+      const src = [], dst = [];
+      for (const b of kept) [[0,0],[1,0],[1,1],[0,1]].forEach((u,i) => {
+        src.push([b.x+u[0],b.z+u[1]]); dst.push(b.quad[i]);
+      });
+      const H = homography(src,dst), flat = H && cameraFromPlane(H,ctx.w,ctx.h);
+      if (!flat) break;
+      P = flat.P;
+      // cameraFromPlane places this observed height at zero. Restore its real y.
+      for (const i of [0,4,8]) P[i+3] -= P[i+1]*heights[0];
+      log('3D: flat-height camera refit');
+      continue;
+    }
     const p3 = [], pix = []; // self-calibration: refit full camera from every verified face
     for (const b of kept) [[0, 0], [1, 0], [1, 1], [0, 1]].forEach((u, i) => { p3.push([b.x + u[0], b.y, b.z + u[1]]); pix.push(b.quad[i]); });
     const P2 = dltCamera(p3, pix); if (!P2) break;
@@ -420,6 +434,20 @@ export function runDetection(cv, img, ref, opts, progress?, hooks?) {
     if (!plane) return { blocks: [], seeds, reason: 'seeds do not share a plane lattice', notes };
     log('growing ' + plane.ids.length + ' coplanar seed(s) across the ground plane');
     let blocks = growPlane(ctx, plane.H, refine, 28), mode = 'planar lattice (all y=0)', camera = null;
+    // Refit only from dense-verified faces, never from unverified neighbours.
+    // Keep the original lattice coordinates so formation anchors do not drift.
+    if (ctx.opts.refitPlane) for (let round = 0; round < 3 && blocks.length >= 3; round++) {
+      const src = [], dst = [];
+      for (const b of blocks) [[0,0],[1,0],[1,1],[0,1]].forEach((u,i) => {
+        src.push([b.x+u[0],b.z+u[1]]); dst.push(b.quad[i]);
+      });
+      const H = homography(src,dst);
+      if (!H) break;
+      const next = growPlane(ctx,H,refine,28);
+      if (next.length <= blocks.length) break;
+      blocks = next; plane.H = H;
+      log('plane refit '+(round+1)+': '+blocks.length+' verified faces');
+    }
     notes.push('plane lattice: ' + plane.ids.length + ' coplanar seeds, ' + blocks.length + ' faces');
     {
       log('trying 3D voxel lattice for other heights');
