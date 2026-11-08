@@ -1,0 +1,14 @@
+{
+  "improved-v2-targets/savanna": {
+    "tiles": 35,
+    "candidates": [
+      [
+        -407,
+        63,
+        33,
+        3
+      ]
+    ],
+    "seconds": 121.65263958903961
+  }
+}

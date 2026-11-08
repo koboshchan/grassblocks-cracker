@@ -1,0 +1,86 @@
+{
+  "improved-assembled/mixed": {
+    "tiles": 99,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -480,
+        63,
+        68,
+        3
+      ]
+    ],
+    "seconds": 95.74199268402299
+  },
+  "improved-assembled/lava": {
+    "tiles": 60,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -56,
+        70,
+        -44,
+        2
+      ]
+    ],
+    "seconds": 114.2021847430151
+  },
+  "improve-lava/flat-ratio/savanna": {
+    "tiles": 33,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -407,
+        63,
+        33,
+        3
+      ]
+    ],
+    "seconds": 65.35943718400085
+  },
+  "improve-rescue/rescue/lava": {
+    "tiles": 59,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -56,
+        70,
+        -44,
+        2
+      ]
+    ],
+    "seconds": 63.320295296027325
+  },
+  "improve-lava-sweep/ratio80/lava": {
+    "tiles": 23,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -56,
+        70,
+        -44,
+        2
+      ]
+    ],
+    "seconds": 65.89684219198534
+  },
+  "improved-v2-targets/savanna": {
+    "tiles": 35,
+    "candidates": 1,
+    "productionWasmVerified": 1,
+    "coordinates": [
+      [
+        -407,
+        63,
+        33,
+        3
+      ]
+    ],
+    "seconds": 121.65263958903961
+  }
+}
