@@ -94,7 +94,19 @@ export class WebGpuDetector {
       }
       const requiredLimits:Record<string,number>={};
       for(const key of ['maxStorageBufferBindingSize','maxBufferSize','maxComputeWorkgroupsPerDimension'] as const){const value=adapter.limits?.[key];if(Number.isSafeInteger(value)&&value>0)requiredLimits[key]=value;}
-      const device = await adapter.requestDevice({requiredLimits});
+      let device: GPUDevice;
+      if (adapter.features?.has('timestamp-query')) {
+        try {
+          device = await adapter.requestDevice({
+            requiredLimits,
+            requiredFeatures: ['timestamp-query'],
+          });
+        } catch {
+          device = await adapter.requestDevice({ requiredLimits }).catch(() => adapter.requestDevice());
+        }
+      } else {
+        device = await adapter.requestDevice({ requiredLimits }).catch(() => adapter.requestDevice());
+      }
 
       const shaderModule = device.createShaderModule({ code: shaderCode });
       const compilationInfo = await shaderModule.getCompilationInfo();
@@ -405,7 +417,7 @@ export class WebGpuDetector {
     const output=new Float32Array(quads.length);const start=performance.now();
     const policy=eccThroughputPolicy(component.capacity);
     const allocationFallbacks:{from:number;to:number}[]=[];
-    this.eccBatchPolicy={capacity:component.capacity,chosenBatchSize:Math.min(count,policy.batchSize),inFlight:policy.inFlight,workingSetPolicy:'eight-quad locality, two independent batches in flight; device capacity is memory safety, not throughput',scratchBudgetBytes:eccScratchBudget(this.device.limits),bytesPerQuad:1180560,allocationFallbacks,limits:{maxStorageBufferBindingSize:this.device.limits.maxStorageBufferBindingSize,maxBufferSize:this.device.limits.maxBufferSize,maxComputeWorkgroupsPerDimension:this.device.limits.maxComputeWorkgroupsPerDimension}};
+    this.eccBatchPolicy={capacity:component.capacity,chosenBatchSize:Math.min(count,policy.batchSize),inFlight:policy.inFlight,workingSetPolicy:'device-scaled batching up to capacity, two independent batches in flight',scratchBudgetBytes:eccScratchBudget(this.device.limits),bytesPerQuad:1180560,allocationFallbacks,limits:{maxStorageBufferBindingSize:this.device.limits.maxStorageBufferBindingSize,maxBufferSize:this.device.limits.maxBufferSize,maxComputeWorkgroupsPerDimension:this.device.limits.maxComputeWorkgroupsPerDimension}};
     const traces=await runEccWindow(count,component.capacity,async(base,n)=>{
       const batch:import('./ecc').EccTrace[]=[];
       for(let offset=0;offset<n;){

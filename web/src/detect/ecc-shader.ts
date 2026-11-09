@@ -90,6 +90,8 @@ fn patchSample(q:u32,plane:u32,x:f32,y:f32)->f32{
  var delta:array<f32,8>;for(var r=0u;r<8u;r++){for(var c=0u;c<8u;c++){delta[r]+=a[r*16u+c+8u]*(lambda*sums[o+78u+c]-sums[o+70u+c]);}if(!finite(delta[r])){state[q].status=-1.0;return;}}
  let order=array<u32,8>(0u,3u,6u,1u,4u,7u,2u,5u);for(var r=0u;r<8u;r++){state[q].warp[order[r]]+=delta[r];}
  state[q].iterations+=1.0;state[q].last=state[q].rho;state[q].rho=rho;
+ if(state[q].iterations>=15.0&&rho<0.65){state[q].status=-1.0;return;}
+ if(state[q].iterations>=25.0&&rho<0.75){state[q].status=-1.0;return;}
  // Native updates W on the final iteration, then tests rho change on next loop.
  if(abs(rho-state[q].last)<0.00001){state[q].pad=1.0;state[q].status=1.0;}else if(state[q].iterations>=60.0){state[q].pad=2.0;state[q].status=1.0;}
 }

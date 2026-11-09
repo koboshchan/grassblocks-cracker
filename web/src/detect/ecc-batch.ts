@@ -33,7 +33,8 @@ export async function allocateEccBuffers(device:GPUDevice,descriptors:GPUBufferD
 export function eccThroughputPolicy(capacity:number){
  if(!Number.isSafeInteger(capacity)||capacity<1)throw Error('Invalid ECC capacity');
  const inFlight=Math.min(2,capacity);
- return {inFlight,batchSize:Math.min(8,Math.floor(capacity/inFlight))};
+ const batchSize=Math.max(1,Math.min(512,Math.floor(capacity/inFlight)));
+ return {inFlight,batchSize};
 }
 export async function runEccWindow<T>(count:number,capacity:number,run:(base:number,n:number)=>Promise<T[]>):Promise<T[]>{
  if(!Number.isSafeInteger(count)||count<0)throw Error('Invalid ECC pending count');
