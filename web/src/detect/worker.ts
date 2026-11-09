@@ -31,6 +31,12 @@ async function chooseGpu(backend: unknown): Promise<boolean> {
   } catch (e) { throw e; }
   return false;
 }
+// GPU execution errors (validation, device loss, pending-map misuse) fall back to the same-input WASM path.
+function useGpuFallback(e: any) {
+  fallback(String(e?.message || e));
+  try { webgpuDetector?.destroy?.(); } catch {}
+  webgpuDetector = null; gpuInit = null;
+}
 function backendResult<T extends object>(result:T):T & {fallbackReason?:string} {
   return fallbackReason ? {...result, backend:pipeline.detectorBackend + " (WebGPU fallback)", fallbackReason} : result;
 }
@@ -106,7 +112,7 @@ self.onmessage = async (ev: MessageEvent) => {
     const { backend, ...detectOpts } = m.opts || {};
     detecting = true;
     ownsDetection = true;
-    const useGpu = await chooseGpu(backend);
+    let useGpu = await chooseGpu(backend);
     const pixelSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
     const inputIdentity={decodedWidth:m.width,decodedHeight:m.height,effectiveDetectWidth:m.width,effectiveDetectHeight:m.height,pixelSha256,resize:'none',settings:detectOpts,reference:m.ref};
     if (m.type === 'classifyQuad') {
@@ -128,7 +134,8 @@ self.onmessage = async (ev: MessageEvent) => {
           });
           return;
         } catch (e: any) {
-          throw e;
+          useGpuFallback(e);
+          useGpu = false;
         }
       }
       post({ type: 'quadResult', ...backendResult({...pipeline.classifyQuad(data, m.width, m.height, m.ref, m.quad), backend:pipeline.detectorBackend}) });
@@ -156,7 +163,7 @@ self.onmessage = async (ev: MessageEvent) => {
         if (!result || !Array.isArray(result.blocks)) throw Error('Invalid WebGPU result');
         post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{inputIdentity,counterSemantics:"per-detection submitted classifier quads; ECC host timers overlap; prior builds accumulated detector-lifetime counters",adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics,eccBatchPolicy:webgpuDetector.eccBatchPolicy,eccBatchTimings:webgpuDetector.eccBatchTimings, timingNote:"host wall measurements overlap; GPU timestamp unavailable", featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
         return;
-      } catch (e:any) { throw e; }
+      } catch (e:any) { useGpuFallback(e); useGpu = false; }
     }
     post({ type: 'progress', backend: pipeline.detectorBackend, text: 'Detecting grass in native WASM', fraction: 0, indeterminate: true });
     const started = performance.now();
@@ -170,7 +177,7 @@ self.onmessage = async (ev: MessageEvent) => {
     }
     post({ type: 'result', result: backendResult({ ...result, diagnostics:{inputIdentity}, transportSeconds: (performance.now() - started) / 1000 }) });
   } catch (e: any) {
-    post({ type: 'error', backend: normalizeBackend(m.opts?.backend)==='webgpu'?'GPU error (no WASM fallback)':pipeline.detectorBackend, text: String(e?.stack || e?.message || e) });
+    post({ type: 'error', backend: pipeline.detectorBackend, text: String(e?.stack || e?.message || e) });
   } finally {
     if (ownsDetection) detecting = false;
   }

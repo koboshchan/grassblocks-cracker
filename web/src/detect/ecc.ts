@@ -11,6 +11,8 @@ export class BatchedGpuEcc {
  private querySet?:GPUQuerySet;
  private resolveBuffer?:GPUBuffer;
  private queryReadbackBuffer?:GPUBuffer;
+ private freeQueryReadbacks:GPUBuffer[]=[];
+ private allQueryReadbacks:GPUBuffer[]=[];
  private constructor(private device:GPUDevice,private pipelines:GPUComputePipeline[],querySet?:GPUQuerySet,resolveBuffer?:GPUBuffer,queryReadbackBuffer?:GPUBuffer){
   this.capacity=eccBatchCapacity(device.limits);if(this.capacity<1)throw Error("ECC device limits exceed conservative scratch budget");
   this.querySet=querySet;this.resolveBuffer=resolveBuffer;this.queryReadbackBuffer=queryReadbackBuffer;
@@ -21,6 +23,14 @@ export class BatchedGpuEcc {
   }else if(this.querySet&&this.resolveBuffer&&!this.queryReadbackBuffer){
    this.queryReadbackBuffer=device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
   }
+  if(this.queryReadbackBuffer){this.allQueryReadbacks.push(this.queryReadbackBuffer);this.freeQueryReadbacks.push(this.queryReadbackBuffer);}
+ }
+ // Each in-flight run needs its own timestamp staging buffer; a buffer with a pending mapAsync cannot be submitted.
+ private acquireQueryReadback(){
+  if(!this.querySet||!this.resolveBuffer)return undefined;
+  let b=this.freeQueryReadbacks.pop();
+  if(!b){b=this.device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});this.allQueryReadbacks.push(b);}
+  return b;
  }
  static async create(device:GPUDevice){
   const shader=device.createShaderModule({code:eccShader});const info=await shader.getCompilationInfo();
@@ -64,7 +74,7 @@ export class BatchedGpuEcc {
     if(slot)slot.buffers=owned;
    }
   }catch(e){if(slot){this.scratchSlots.splice(this.scratchSlots.indexOf(slot),1);}throw e;}
-  const [params,states,patch,pixels,jac,sums,read]=owned;let mapped=false;let queryMapped=false;
+  const [params,states,patch,pixels,jac,sums,read]=owned;let mapped=false;let queryMapped=false;const qrb=this.acquireQueryReadback();
   try{
    this.device.queue.writeBuffer(params,0,new Uint32Array([width,height,count,0]));this.device.queue.writeBuffer(states,0,initial);
    const bind=this.device.createBindGroup({layout:this.pipelines[0].getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:params}},{binding:1,resource:image},{binding:2,resource:{buffer:refs}},...[states,patch,pixels,jac,sums].map((b,i)=>({binding:i+3,resource:{buffer:b}}))]});
@@ -76,7 +86,7 @@ export class BatchedGpuEcc {
    // WebGPU defines one usage/synchronization scope per compute dispatch,
    // even within a single pass. Preserve every dispatch and storage dependency
    // without reopening Metal compute encoders 303 times.
-   const hasTimestamps=Boolean(this.querySet&&this.resolveBuffer&&this.queryReadbackBuffer);
+   const hasTimestamps=Boolean(this.querySet&&this.resolveBuffer&&qrb);
    const compute=hasTimestamps?encoder.beginComputePass({timestampWrites:{querySet:this.querySet!,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}}):encoder.beginComputePass();
    compute.setBindGroup(0,bind);
    const pass=(index:number,x:number,y=1)=>{compute.setPipeline(this.pipelines[index]);compute.dispatchWorkgroups(x,y);};
@@ -85,14 +95,14 @@ export class BatchedGpuEcc {
    compute.end();
    if(hasTimestamps){
     encoder.resolveQuerySet(this.querySet!,0,2,this.resolveBuffer!,0);
-    encoder.copyBufferToBuffer(this.resolveBuffer!,0,this.queryReadbackBuffer!,0,16);
+    encoder.copyBufferToBuffer(this.resolveBuffer!,0,qrb!,0,16);
    }
    encoder.copyBufferToBuffer(states,0,read,0,initial.byteLength);encoder.copyBufferToBuffer(sums,0,read,initial.byteLength,count*86*4);const command=encoder.finish(),encoded=performance.now();this.device.queue.submit([command]);
    let gpuTimestampMs:number|null=null;
    if(hasTimestamps){
-    await Promise.all([read.mapAsync(GPUMapMode.READ),this.queryReadbackBuffer!.mapAsync(GPUMapMode.READ)]);
+    await Promise.all([read.mapAsync(GPUMapMode.READ),qrb!.mapAsync(GPUMapMode.READ)]);
     mapped=true;queryMapped=true;
-    const ts=new BigInt64Array(this.queryReadbackBuffer!.getMappedRange());
+    const ts=new BigInt64Array(qrb!.getMappedRange());
     const start=ts[0],end=ts[1];
     gpuTimestampMs=Number(end-start)/1000000;
    }else{
@@ -102,14 +112,14 @@ export class BatchedGpuEcc {
    onTiming?.(this.lastHostTiming);
    const raw=new Float32Array(read.getMappedRange()).slice();
    return quads.map((q,i)=>{const s=i*28,base=Array.from(raw.slice(s,s+9)),warp=Array.from(raw.slice(s+9,s+18));const composed=multiply(base,warp);const candidate=[[0,0],[128,0],[128,128],[0,128]].map(([x,y])=>{const d=composed[6]*x+composed[7]*y+composed[8];return [(composed[0]*x+composed[1]*y+composed[2])/d,(composed[3]*x+composed[4]*y+composed[5])/d];});return {base,warp,composed,rho:raw[s+18],iterations:raw[s+21],status:raw[s+20],lastRho:raw[s+19],rhoChange:Math.abs(raw[s+18]-raw[s+19]),converged:raw[s+23]===1,iterationLimitReached:raw[s+23]===2,termination:raw[s+20]<0?'failure':raw[s+23]===1?'epsilon':raw[s+23]===2?'iteration-limit':'unfinished',maskCount:raw[s+25],firstMaskCount:raw[s+24],minMaskCount:raw[s+26],maxMaskCount:raw[s+27],rotation:rotations[i],quad:raw[s+20]>0?candidate:q};});
-  }finally{if(mapped)read.unmap();if(queryMapped)this.queryReadbackBuffer?.unmap();if(slot)slot.busy=false;else owned.forEach(b=>b.destroy());}
+  }finally{if(mapped)read.unmap();if(queryMapped)qrb?.unmap();if(qrb)this.freeQueryReadbacks.push(qrb);if(slot)slot.busy=false;else owned.forEach(b=>b.destroy());}
  }
  destroy(){
   for(const slot of this.scratchSlots)slot.buffers.forEach(b=>b.destroy());
   this.scratchSlots=[];
   this.querySet?.destroy();
   this.resolveBuffer?.destroy();
-  this.queryReadbackBuffer?.destroy();
+  this.allQueryReadbacks.forEach(b=>b.destroy());this.allQueryReadbacks=[];this.freeQueryReadbacks=[];
   this.querySet=undefined;
   this.resolveBuffer=undefined;
   this.queryReadbackBuffer=undefined;
