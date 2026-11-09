@@ -71,13 +71,16 @@ fn get_transform(quad: Quad) -> Transform {
         return Transform(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, false);
     }
 
-    let g = ((dx3 * dy2 - dx2 * dy3) / det) / 16.0;
-    let h = ((dx1 * dy3 - dx3 * dy1) / det) / 16.0;
-    let a = (x1 - x0) / 16.0 + g * x1;
-    let b = (x3 - x0) / 16.0 + h * x3;
+    let inv_16 = 0.0625;
+    let inv_16_det = inv_16 / det;
+
+    let g = (dx3 * dy2 - dx2 * dy3) * inv_16_det;
+    let h = (dx1 * dy3 - dx3 * dy1) * inv_16_det;
+    let a = (x1 - x0) * inv_16 + g * x1;
+    let b = (x3 - x0) * inv_16 + h * x3;
     let c = x0;
-    let d = (y1 - y0) / 16.0 + g * y1;
-    let e = (y3 - y0) / 16.0 + h * y3;
+    let d = (y1 - y0) * inv_16 + g * y1;
+    let e = (y3 - y0) * inv_16 + h * y3;
     let f = y0;
 
     return Transform(a, b, c, d, e, f, g, h, true);
@@ -96,43 +99,56 @@ fn compensated_add(acc:Compensated4, term:vec4<f32>) -> Compensated4 {
 struct CenteredCorrelation { scores:vec4<f32>, variance:f32 }
 // region=4 means all196 pixels; regions0..3 are the unchanged49-pixel votes.
 fn centered_correlation(sampled_patch:ptr<function,array<f32,256>>, region:u32) -> CenteredCorrelation {
-    var sum_a = Compensated4(vec4<f32>(0.0),vec4<f32>(0.0));
-    let count = select(49.0,196.0,region==4u);
-    for(var j=1u;j<15u;j=j+1u){for(var i=1u;i<15u;i=i+1u){
-        let q=select(0u,1u,i>=8u)+select(0u,2u,j>=8u);
-        if(region==4u||region==q){
-            sum_a=compensated_add(sum_a,vec4<f32>((*sampled_patch)[j*16u+i]));
+    let is_full = region == 4u;
+    let count = select(49.0, 196.0, is_full);
+    let j_start = select(select(1u, 8u, region >= 2u), 1u, is_full);
+    let j_end = select(j_start + 7u, 15u, is_full);
+    let i_start = select(select(1u, 8u, (region & 1u) == 1u), 1u, is_full);
+    let i_end = select(i_start + 7u, 15u, is_full);
+
+    var sum_a = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
+    for (var j = j_start; j < j_end; j = j + 1u) {
+        for (var i = i_start; i < i_end; i = i + 1u) {
+            sum_a = compensated_add(sum_a, vec4<f32>((*sampled_patch)[j * 16u + i]));
         }
-    }}
-    let mean_a=sum_a.value/count;
+    }
+    let mean_a = sum_a.value / count;
     // Existing reference sums are exact uint8 integer sums, not raw variances.
-    var reference_sum=stats.sb;
-    if(region<4u){reference_sum=stats.q_sb[region];}
-    let mean_b=reference_sum/count;
-    var square_a=Compensated4(vec4<f32>(0.0),vec4<f32>(0.0));
-    var square_b=square_a;var product=square_a;
-    var deviation_a=square_a;var deviation_b=square_a;
-    for(var j=1u;j<15u;j=j+1u){for(var i=1u;i<15u;i=i+1u){
-        let q=select(0u,1u,i>=8u)+select(0u,2u,j>=8u);
-        if(region==4u||region==q){
-            let da=vec4<f32>((*sampled_patch)[j*16u+i])-mean_a;
-            let db=refs[j*16u+i]-mean_b;
-            square_a=compensated_add(square_a,da*da);
-            square_b=compensated_add(square_b,db*db);
-            product=compensated_add(product,da*db);
-            deviation_a=compensated_add(deviation_a,da);
-            deviation_b=compensated_add(deviation_b,db);
+    var reference_sum = stats.sb;
+    if (!is_full) {
+        reference_sum = stats.q_sb[region];
+    }
+    let mean_b = reference_sum / count;
+    var square_a = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
+    var square_b = square_a;
+    var product = square_a;
+    var deviation_a = square_a;
+    var deviation_b = square_a;
+    for (var j = j_start; j < j_end; j = j + 1u) {
+        for (var i = i_start; i < i_end; i = i + 1u) {
+            let idx = j * 16u + i;
+            let da = vec4<f32>((*sampled_patch)[idx]) - mean_a;
+            let db = refs[idx] - mean_b;
+            square_a = compensated_add(square_a, da * da);
+            square_b = compensated_add(square_b, db * db);
+            product = compensated_add(product, da * db);
+            deviation_a = compensated_add(deviation_a, da);
+            deviation_b = compensated_add(deviation_b, db);
         }
-    }}
+    }
     // Correct mean-rounding error using centered residual sums, not large raw moments.
-    let va=square_a.value-deviation_a.value*deviation_a.value/count;
-    let vb=square_b.value-deviation_b.value*deviation_b.value/count;
-    let covariance=product.value-deviation_a.value*deviation_b.value/count;
-    var scores=vec4<f32>(0.0);
-    if(va.x>1e-7){for(var k=0u;k<4u;k=k+1u){
-        if(vb[k]>1e-7){scores[k]=covariance[k]/sqrt(va.x*vb[k]);}
-    }}
-    return CenteredCorrelation(scores,va.x);
+    let va = square_a.value - deviation_a.value * deviation_a.value / count;
+    let vb = square_b.value - deviation_b.value * deviation_b.value / count;
+    let covariance = product.value - deviation_a.value * deviation_b.value / count;
+    var scores = vec4<f32>(0.0);
+    if (va.x > 1e-7) {
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            if (vb[k] > 1e-7) {
+                scores[k] = covariance[k] / sqrt(va.x * vb[k]);
+            }
+        }
+    }
+    return CenteredCorrelation(scores, va.x);
 }
 
 fn eval_quad_score(quad: Quad) -> f32 {
@@ -212,7 +228,54 @@ fn eval_full_result(quad: Quad) -> Result {
         }
     }
 
-    let sc=centered_correlation(&sampled_patch,4u).scores;
+    let zero_comp = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
+    var sum_a = zero_comp;
+    var q_sum_a = array<Compensated4, 4>(zero_comp, zero_comp, zero_comp, zero_comp);
+
+    for (var j = 1u; j < 15u; j = j + 1u) {
+        let q_row = select(0u, 2u, j >= 8u);
+        for (var i = 1u; i < 15u; i = i + 1u) {
+            let val = vec4<f32>(sampled_patch[j * 16u + i]);
+            sum_a = compensated_add(sum_a, val);
+            let q = q_row + select(0u, 1u, i >= 8u);
+            q_sum_a[q] = compensated_add(q_sum_a[q], val);
+        }
+    }
+
+    let mean_a = sum_a.value / 196.0;
+    let mean_b = stats.sb / 196.0;
+
+    var square_a = zero_comp;
+    var square_b = zero_comp;
+    var product = zero_comp;
+    var deviation_a = zero_comp;
+    var deviation_b = zero_comp;
+
+    for (var j = 1u; j < 15u; j = j + 1u) {
+        for (var i = 1u; i < 15u; i = i + 1u) {
+            let idx = j * 16u + i;
+            let da = vec4<f32>(sampled_patch[idx]) - mean_a;
+            let db = refs[idx] - mean_b;
+            square_a = compensated_add(square_a, da * da);
+            square_b = compensated_add(square_b, db * db);
+            product = compensated_add(product, da * db);
+            deviation_a = compensated_add(deviation_a, da);
+            deviation_b = compensated_add(deviation_b, db);
+        }
+    }
+
+    let va = square_a.value - deviation_a.value * deviation_a.value / 196.0;
+    let vb = square_b.value - deviation_b.value * deviation_b.value / 196.0;
+    let covariance = product.value - deviation_a.value * deviation_b.value / 196.0;
+
+    var sc = vec4<f32>(0.0);
+    if (va.x > 1e-7) {
+        for (var k = 0u; k < 4u; k = k + 1u) {
+            if (vb[k] > 1e-7) {
+                sc[k] = covariance[k] / sqrt(va.x * vb[k]);
+            }
+        }
+    }
 
     var best = 0u;
     for (var k = 1u; k < 4u; k = k + 1u) {
@@ -233,7 +296,45 @@ fn eval_full_result(quad: Quad) -> Result {
 
     var votes = 0u;
     for (var q = 0u; q < 4u; q = q + 1u) {
-        let q_sc=centered_correlation(&sampled_patch,q).scores;
+        let q_mean_a = q_sum_a[q].value / 49.0;
+        let q_mean_b = stats.q_sb[q] / 49.0;
+
+        var q_square_a = zero_comp;
+        var q_square_b = zero_comp;
+        var q_product = zero_comp;
+        var q_deviation_a = zero_comp;
+        var q_deviation_b = zero_comp;
+
+        let j_start = select(1u, 8u, q >= 2u);
+        let j_end = j_start + 7u;
+        let i_start = select(1u, 8u, (q & 1u) == 1u);
+        let i_end = i_start + 7u;
+
+        for (var j = j_start; j < j_end; j = j + 1u) {
+            for (var i = i_start; i < i_end; i = i + 1u) {
+                let idx = j * 16u + i;
+                let da = vec4<f32>(sampled_patch[idx]) - q_mean_a;
+                let db = refs[idx] - q_mean_b;
+                q_square_a = compensated_add(q_square_a, da * da);
+                q_square_b = compensated_add(q_square_b, db * db);
+                q_product = compensated_add(q_product, da * db);
+                q_deviation_a = compensated_add(q_deviation_a, da);
+                q_deviation_b = compensated_add(q_deviation_b, db);
+            }
+        }
+
+        let q_va = q_square_a.value - q_deviation_a.value * q_deviation_a.value / 49.0;
+        let q_vb = q_square_b.value - q_deviation_b.value * q_deviation_b.value / 49.0;
+        let q_covariance = q_product.value - q_deviation_a.value * q_deviation_b.value / 49.0;
+
+        var q_sc = vec4<f32>(0.0);
+        if (q_va.x > 1e-7) {
+            for (var k = 0u; k < 4u; k = k + 1u) {
+                if (q_vb[k] > 1e-7) {
+                    q_sc[k] = q_covariance[k] / sqrt(q_va.x * q_vb[k]);
+                }
+            }
+        }
 
         var q_best = 0u;
         for (var k = 1u; k < 4u; k = k + 1u) {

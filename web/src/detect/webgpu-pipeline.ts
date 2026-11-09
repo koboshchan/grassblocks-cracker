@@ -37,26 +37,49 @@ export interface DetectionResult {
 
 function solveLinear(A: number[][], b: number[]): number[] | null {
   const n = b.length;
-  const m = A.map((r, i) => [...r, b[i]]);
+  const stride = n + 1;
+  const m = new Float64Array(n * stride);
+  for (let i = 0; i < n; i++) {
+    const row = A[i];
+    const rowOffset = i * stride;
+    for (let j = 0; j < n; j++) {
+      m[rowOffset + j] = row[j];
+    }
+    m[rowOffset + n] = b[i];
+  }
   for (let j = 0; j < n; j++) {
     let k = j;
     for (let i = j + 1; i < n; i++) {
-      if (Math.abs(m[i][j]) > Math.abs(m[k][j])) k = i;
+      if (Math.abs(m[i * stride + j]) > Math.abs(m[k * stride + j])) k = i;
     }
-    [m[j], m[k]] = [m[k], m[j]];
-    if (Math.abs(m[j][j]) < 1e-12) return null;
-    const d = m[j][j];
-    for (let t = j; t <= n; t++) m[j][t] /= d;
+    if (k !== j) {
+      const r1 = j * stride;
+      const r2 = k * stride;
+      for (let t = j; t <= n; t++) {
+        const tmp = m[r1 + t];
+        m[r1 + t] = m[r2 + t];
+        m[r2 + t] = tmp;
+      }
+    }
+    const d = m[j * stride + j];
+    if (Math.abs(d) < 1e-12) return null;
+    const rowJ = j * stride;
+    for (let t = j; t <= n; t++) m[rowJ + t] /= d;
     for (let i = 0; i < n; i++) {
       if (i !== j) {
-        const f = m[i][j];
+        const rowI = i * stride;
+        const f = m[rowI + j];
         if (f) {
-          for (let t = j; t <= n; t++) m[i][t] -= f * m[j][t];
+          for (let t = j; t <= n; t++) m[rowI + t] -= f * m[rowJ + t];
         }
       }
     }
   }
-  return m.map(r => r[n]);
+  const sol = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    sol[i] = m[i * stride + n];
+  }
+  return sol;
 }
 
 export function homography(src: number[][], dst: number[][]): number[] | null {
@@ -113,41 +136,73 @@ function norm(v: number[]): number {
   return Math.hypot(...v);
 }
 
-function jacobiEigen(S: number[][], n: number): { vals: number[]; vecs: number[][] } {
-  const A = S.map(r => r.slice());
-  const V = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => +(i === j)));
+function jacobiEigen(S: number[][] | Float64Array, n: number): { vals: number[]; vecs: number[][] } {
+  const A = new Float64Array(n * n);
+  if (S instanceof Float64Array) {
+    A.set(S);
+  } else {
+    for (let i = 0; i < n; i++) {
+      const row = S[i];
+      const offset = i * n;
+      for (let j = 0; j < n; j++) {
+        A[offset + j] = row[j];
+      }
+    }
+  }
+  const V = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) {
+    V[i * n + i] = 1;
+  }
   for (let sweep = 0; sweep < 60; sweep++) {
     let off = 0;
     for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) off += A[i][j] * A[i][j];
+      const offset = i * n;
+      for (let j = i + 1; j < n; j++) {
+        const aij = A[offset + j];
+        off += aij * aij;
+      }
     }
     if (off < 1e-24) break;
     for (let p = 0; p < n; p++) {
       for (let q = p + 1; q < n; q++) {
-        if (Math.abs(A[p][q]) < 1e-30) continue;
-        const th = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+        const apq = A[p * n + q];
+        if (Math.abs(apq) < 1e-30) continue;
+        const th = (A[q * n + q] - A[p * n + p]) / (2 * apq);
         const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1));
         const c = 1 / Math.sqrt(t * t + 1);
         const s = t * c;
         for (let k = 0; k < n; k++) {
-          const akp = A[k][p], akq = A[k][q];
-          A[k][p] = c * akp - s * akq;
-          A[k][q] = s * akp + c * akq;
+          const akp = A[k * n + p], akq = A[k * n + q];
+          A[k * n + p] = c * akp - s * akq;
+          A[k * n + q] = s * akp + c * akq;
         }
         for (let k = 0; k < n; k++) {
-          const apk = A[p][k], aqk = A[q][k];
-          A[p][k] = c * apk - s * aqk;
-          A[q][k] = s * apk + c * aqk;
+          const apk = A[p * n + k], aqk = A[q * n + k];
+          A[p * n + k] = c * apk - s * aqk;
+          A[q * n + k] = s * apk + c * aqk;
         }
         for (let k = 0; k < n; k++) {
-          const vkp = V[k][p], vkq = V[k][q];
-          V[k][p] = c * vkp - s * vkq;
-          V[k][q] = s * vkp + c * vkq;
+          const vkp = V[k * n + p], vkq = V[k * n + q];
+          V[k * n + p] = c * vkp - s * vkq;
+          V[k * n + q] = s * vkp + c * vkq;
         }
       }
     }
   }
-  return { vals: A.map((r, i) => r[i]), vecs: V };
+  const vals = new Array<number>(n);
+  for (let i = 0; i < n; i++) {
+    vals[i] = A[i * n + i];
+  }
+  const vecs: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const row = new Array<number>(n);
+    const offset = i * n;
+    for (let j = 0; j < n; j++) {
+      row[j] = V[offset + j];
+    }
+    vecs[i] = row;
+  }
+  return { vals, vecs };
 }
 
 export function cameraFromPlane(H: number[], w: number, h: number): { P: number[]; f: number } | null {
@@ -187,19 +242,28 @@ export function dltCamera(pts3: number[][], pix: number[][]): number[] | null {
   pix.forEach(p => (d2 += Math.hypot(p[0] - c2[0], p[1] - c2[1]) / n));
   const s3 = Math.sqrt(3) / (d3 || 1);
   const s2 = Math.SQRT2 / (d2 || 1);
-  const S = Array.from({ length: 12 }, () => new Array(12).fill(0));
+  const S = new Float64Array(144);
+  const V = new Float64Array(4);
+  V[3] = 1;
   for (let i = 0; i < n; i++) {
-    const X = pts3[i].map((v, k) => (v - c3[k]) * s3);
+    const p3 = pts3[i];
+    V[0] = (p3[0] - c3[0]) * s3;
+    V[1] = (p3[1] - c3[1]) * s3;
+    V[2] = (p3[2] - c3[2]) * s3;
     const u = (pix[i][0] - c2[0]) * s2;
     const v = (pix[i][1] - c2[1]) * s2;
-    const V = [...X, 1];
-    const r1 = [...V, 0, 0, 0, 0, ...V.map(t => -u * t)];
-    const r2 = [0, 0, 0, 0, ...V, ...V.map(t => -v * t)];
-    for (const r of [r1, r2]) {
-      for (let a = 0; a < 12; a++) {
-        for (let b = 0; b < 12; b++) {
-          S[a][b] += r[a] * r[b];
-        }
+    const u2v2 = u * u + v * v;
+    for (let k = 0; k < 4; k++) {
+      const vk = V[k];
+      for (let l = 0; l < 4; l++) {
+        const p = vk * V[l];
+        S[k * 12 + l] += p;
+        S[(k + 4) * 12 + (l + 4)] += p;
+        S[k * 12 + (l + 8)] -= u * p;
+        S[(k + 8) * 12 + l] -= u * p;
+        S[(k + 4) * 12 + (l + 8)] -= v * p;
+        S[(k + 8) * 12 + (l + 4)] -= v * p;
+        S[(k + 8) * 12 + (l + 8)] += u2v2 * p;
       }
     }
   }
@@ -286,7 +350,7 @@ function gridQuad(H: number[], x: number, z: number): number[][] {
   ];
 }
 
-function projectCamQuad(
+export function projectCamQuad(
   P: number[],
   x: number,
   y: number,
@@ -294,30 +358,53 @@ function projectCamQuad(
   w: number,
   h: number
 ): number[][] | null {
-  const corners = [
-    [x, y, z],
-    [x + 1, y, z],
-    [x + 1, y, z + 1],
-    [x, y, z + 1],
+  const d0 = P[8] * x + P[9] * y + P[10] * z + P[11];
+  if (d0 <= 0) return null;
+  const u0 = (P[0] * x + P[1] * y + P[2] * z + P[3]) / d0;
+  const v0 = (P[4] * x + P[5] * y + P[6] * z + P[7]) / d0;
+  if (!(u0 >= 0 && u0 < w - 1 && v0 >= 0 && v0 < h - 1)) return null;
+
+  const d1 = P[8] * (x + 1) + P[9] * y + P[10] * z + P[11];
+  if (d1 <= 0) return null;
+  const u1 = (P[0] * (x + 1) + P[1] * y + P[2] * z + P[3]) / d1;
+  const v1 = (P[4] * (x + 1) + P[5] * y + P[6] * z + P[7]) / d1;
+  if (!(u1 >= 0 && u1 < w - 1 && v1 >= 0 && v1 < h - 1)) return null;
+
+  const d2 = P[8] * (x + 1) + P[9] * y + P[10] * (z + 1) + P[11];
+  if (d2 <= 0) return null;
+  const u2 = (P[0] * (x + 1) + P[1] * y + P[2] * (z + 1) + P[3]) / d2;
+  const v2 = (P[4] * (x + 1) + P[5] * y + P[6] * (z + 1) + P[7]) / d2;
+  if (!(u2 >= 0 && u2 < w - 1 && v2 >= 0 && v2 < h - 1)) return null;
+
+  const d3 = P[8] * x + P[9] * y + P[10] * (z + 1) + P[11];
+  if (d3 <= 0) return null;
+  const u3 = (P[0] * x + P[1] * y + P[2] * (z + 1) + P[3]) / d3;
+  const v3 = (P[4] * x + P[5] * y + P[6] * (z + 1) + P[7]) / d3;
+  if (!(u3 >= 0 && u3 < w - 1 && v3 >= 0 && v3 < h - 1)) return null;
+
+  const z0 = (u1 - u0) * (v2 - v1) - (v1 - v0) * (u2 - u1);
+  const z1 = (u2 - u1) * (v3 - v2) - (v2 - v1) * (u3 - u2);
+  const z2 = (u3 - u2) * (v0 - v3) - (v3 - v2) * (u0 - u3);
+  const z3 = (u0 - u3) * (v1 - v0) - (v0 - v3) * (u1 - u0);
+  if (!((z0 > 0 && z1 > 0 && z2 > 0 && z3 > 0) || (z0 < 0 && z1 < 0 && z2 < 0 && z3 < 0))) {
+    return null;
+  }
+
+  const e0 = (u1 - u0) * (u1 - u0) + (v1 - v0) * (v1 - v0);
+  if (e0 < 64) return null;
+  const e1 = (u2 - u1) * (u2 - u1) + (v2 - v1) * (v2 - v1);
+  if (e1 < 64) return null;
+  const e2 = (u3 - u2) * (u3 - u2) + (v3 - v2) * (v3 - v2);
+  if (e2 < 64) return null;
+  const e3 = (u0 - u3) * (u0 - u3) + (v0 - v3) * (v0 - v3);
+  if (e3 < 64) return null;
+
+  return [
+    [u0, v0],
+    [u1, v1],
+    [u2, v2],
+    [u3, v3],
   ];
-  const quad: number[][] = [];
-  for (let i = 0; i < 4; i++) {
-    const [X, Y, Z] = corners[i];
-    const d = P[8] * X + P[9] * Y + P[10] * Z + P[11];
-    if (d <= 0) return null;
-    const u = (P[0] * X + P[1] * Y + P[2] * Z + P[3]) / d;
-    if (!(u >= 0 && u < w - 1)) return null;
-    const v = (P[4] * X + P[5] * Y + P[6] * Z + P[7]) / d;
-    if (!(v >= 0 && v < h - 1)) return null;
-    quad.push([u, v]);
-  }
-  if (!isConvex(quad)) return null;
-  for (let i = 0; i < 4; i++) {
-    const dx = quad[i][0] - quad[(i + 1) % 4][0];
-    const dy = quad[i][1] - quad[(i + 1) % 4][1];
-    if (dx * dx + dy * dy < 64) return null;
-  }
-  return quad;
 }
 
 export function canonicalQuad(q: number[][]): number[][] {

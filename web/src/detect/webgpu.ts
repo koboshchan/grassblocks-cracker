@@ -19,6 +19,9 @@ export class WebGpuDetector {
   private paramsBuffer: GPUBuffer;
   private refStatsBuffer: GPUBuffer | null = null;
   private refsBuffer: GPUBuffer | null = null;
+  private paramsData = new Uint32Array(4);
+  private refStatsData: Float32Array | null = null;
+  private refPatternData: Float32Array | null = null;
 
   private destroyed = false;
 
@@ -184,86 +187,36 @@ export class WebGpuDetector {
   setRefs(refs: number[][]): void {
     if (this.destroyed) throw new Error('WebGpuDetector is destroyed');
 
-    let rotations: number[][];
+    const refPatternData = (this.refPatternData ??= new Float32Array(256 * 4));
+
     if (refs.length === 16 && refs[0].length === 16) {
       // 16x16 reference matrix -> generate 4 clockwise rotations
-      rotations = [];
-      for (let k = 0; k < 4; k++) {
-        const rot: number[] = [];
-        for (let y = 0; y < 16; y++) {
-          for (let x = 0; x < 16; x++) {
-            let xx = x;
-            let yy = y;
-            for (let j = 0; j < k; j++) {
-              const t = xx;
-              xx = yy;
-              yy = 15 - t;
-            }
-            rot.push(refs[yy][xx]);
-          }
+      for (let y = 0; y < 16; y++) {
+        const row = refs[y];
+        const yRot2 = 15 - y;
+        for (let x = 0; x < 16; x++) {
+          const idx = (y << 4) | x;
+          const base = idx << 2;
+          refPatternData[base + 0] = row[x];
+          refPatternData[base + 1] = refs[15 - x][y];
+          refPatternData[base + 2] = refs[yRot2][15 - x];
+          refPatternData[base + 3] = refs[x][yRot2];
         }
-        rotations.push(rot);
       }
     } else if (refs.length === 4 && refs[0].length === 256) {
-      rotations = refs;
+      const r0 = refs[0];
+      const r1 = refs[1];
+      const r2 = refs[2];
+      const r3 = refs[3];
+      for (let idx = 0; idx < 256; idx++) {
+        const base = idx << 2;
+        refPatternData[base + 0] = r0[idx];
+        refPatternData[base + 1] = r1[idx];
+        refPatternData[base + 2] = r2[idx];
+        refPatternData[base + 3] = r3[idx];
+      }
     } else {
       throw new Error('Expected 4 flat 16x16 rotations or a 16x16 reference matrix');
-    }
-
-    // 4-way reference patterns: array<vec4<f32>, 256>
-    const refPatternData = new Float32Array(256 * 4);
-    for (let idx = 0; idx < 256; idx++) {
-      refPatternData[idx * 4 + 0] = rotations[0][idx];
-      refPatternData[idx * 4 + 1] = rotations[1][idx];
-      refPatternData[idx * 4 + 2] = rotations[2][idx];
-      refPatternData[idx * 4 + 3] = rotations[3][idx];
-    }
-
-    // Reference statistics: 14x14 inner region (196 pixels) and 4 quadrants (49 pixels each)
-    const sb = [0, 0, 0, 0];
-    const bb = [0, 0, 0, 0];
-    const q_sb = [
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-    ];
-    const q_bb = [
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-    ];
-
-    for (let j = 1; j < 15; j++) {
-      for (let i = 1; i < 15; i++) {
-        const q = (i >= 8 ? 1 : 0) + (j >= 8 ? 2 : 0);
-        const idx = j * 16 + i;
-        for (let k = 0; k < 4; k++) {
-          const val = rotations[k][idx];
-          sb[k] += val;
-          bb[k] += val * val;
-          q_sb[q][k] += val;
-          q_bb[q][k] += val * val;
-        }
-      }
-    }
-
-    const vb = [0, 0, 0, 0];
-    for (let k = 0; k < 4; k++) {
-      vb[k] = bb[k] - (sb[k] * sb[k]) / 196.0;
-    }
-
-    const q_vb = [
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-      [0, 0, 0, 0],
-    ];
-    for (let q = 0; q < 4; q++) {
-      for (let k = 0; k < 4; k++) {
-        q_vb[q][k] = q_bb[q][k] - (q_sb[q][k] * q_sb[q][k]) / 49.0;
-      }
     }
 
     // RefStats struct packing:
@@ -275,17 +228,55 @@ export class WebGpuDetector {
     //   q_bb: array<vec4<f32>, 4>, // offset 28 (16 floats)
     //   q_vb: array<vec4<f32>, 4>, // offset 44 (16 floats)
     // };
-    const refStatsData = new Float32Array(64);
-    for (let k = 0; k < 4; k++) {
-      refStatsData[0 + k] = sb[k];
-      refStatsData[4 + k] = bb[k];
-      refStatsData[8 + k] = vb[k];
+    const refStatsData = (this.refStatsData ??= new Float32Array(64));
+    refStatsData.fill(0);
+
+    // Reference statistics: 14x14 inner region (196 pixels) and 4 quadrants (49 pixels each)
+    for (let j = 1; j < 15; j++) {
+      const qRow = j >= 8 ? 8 : 0;
+      for (let i = 1; i < 15; i++) {
+        const qOffset = (i >= 8 ? 4 : 0) + qRow;
+        const base = ((j << 4) | i) << 2;
+        const qSb = 12 + qOffset;
+        const qBb = 28 + qOffset;
+
+        const v0 = refPatternData[base + 0];
+        const v1 = refPatternData[base + 1];
+        const v2 = refPatternData[base + 2];
+        const v3 = refPatternData[base + 3];
+
+        refStatsData[0] += v0;
+        refStatsData[1] += v1;
+        refStatsData[2] += v2;
+        refStatsData[3] += v3;
+
+        refStatsData[4] += v0 * v0;
+        refStatsData[5] += v1 * v1;
+        refStatsData[6] += v2 * v2;
+        refStatsData[7] += v3 * v3;
+
+        refStatsData[qSb + 0] += v0;
+        refStatsData[qSb + 1] += v1;
+        refStatsData[qSb + 2] += v2;
+        refStatsData[qSb + 3] += v3;
+
+        refStatsData[qBb + 0] += v0 * v0;
+        refStatsData[qBb + 1] += v1 * v1;
+        refStatsData[qBb + 2] += v2 * v2;
+        refStatsData[qBb + 3] += v3 * v3;
+      }
     }
+
+    for (let k = 0; k < 4; k++) {
+      const sbVal = refStatsData[k];
+      refStatsData[8 + k] = refStatsData[4 + k] - (sbVal * sbVal) / 196.0;
+    }
+
     for (let q = 0; q < 4; q++) {
+      const qOffset = q << 2;
       for (let k = 0; k < 4; k++) {
-        refStatsData[12 + q * 4 + k] = q_sb[q][k];
-        refStatsData[28 + q * 4 + k] = q_bb[q][k];
-        refStatsData[44 + q * 4 + k] = q_vb[q][k];
+        const qSbVal = refStatsData[12 + qOffset + k];
+        refStatsData[44 + qOffset + k] = refStatsData[28 + qOffset + k] - (qSbVal * qSbVal) / 49.0;
       }
     }
 
@@ -325,8 +316,11 @@ export class WebGpuDetector {
       return new Float32Array(0);
     }
 
-    const paramsData = new Uint32Array([this.imageWidth, this.imageHeight, count, 0]);
-    this.device.queue.writeBuffer(this.paramsBuffer, 0, paramsData);
+    this.paramsData[0] = this.imageWidth;
+    this.paramsData[1] = this.imageHeight;
+    this.paramsData[2] = count;
+    this.paramsData[3] = 0;
+    this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
 
     const quadsByteLength = Math.max(32, quads.byteLength);
     const quadsBuffer = this.device.createBuffer({
@@ -374,8 +368,7 @@ export class WebGpuDetector {
       await readBuffer.mapAsync(GPUMapMode.READ);
       mapped = true;
 
-      const out = new Float32Array(count * 5);
-      out.set(new Float32Array(readBuffer.getMappedRange(0, count * 20)));
+      const out = new Float32Array(readBuffer.getMappedRange(0, count * 20).slice(0));
       return out;
     } finally {
       if (mapped) {
@@ -402,7 +395,13 @@ export class WebGpuDetector {
     const component=await this.eccComponent;
     const count=quads.length/8;
     if (!Number.isInteger(count)) throw Error('Invalid ECC quad buffer');
-    if (!rotations) {const v=await this.classifyBatch(quads);rotations=Array.from({length:count},(_,i)=>Math.round(v[i*5+1]));}
+    if (!rotations) {
+      const v = await this.classifyBatch(quads);
+      rotations = new Array(count);
+      for (let i = 0; i < count; i++) {
+        rotations[i] = Math.round(v[i * 5 + 1]);
+      }
+    }
     const output=new Float32Array(quads.length);const start=performance.now();
     const policy=eccThroughputPolicy(component.capacity);
     const allocationFallbacks:{from:number;to:number}[]=[];
@@ -411,7 +410,16 @@ export class WebGpuDetector {
       const batch:import('./ecc').EccTrace[]=[];
       for(let offset=0;offset<n;){
         const result=await withEccAllocationRetry(n-offset,n-offset,async size=>{
-          const qs=Array.from({length:size},(_,j)=>Array.from({length:4},(_,k)=>[quads[(base+offset+j)*8+k*2],quads[(base+offset+j)*8+k*2+1]]));
+          const qs: number[][][] = new Array(size);
+          for (let j = 0; j < size; j++) {
+            const idx = (base + offset + j) * 8;
+            qs[j] = [
+              [quads[idx], quads[idx + 1]],
+              [quads[idx + 2], quads[idx + 3]],
+              [quads[idx + 4], quads[idx + 5]],
+              [quads[idx + 6], quads[idx + 7]],
+            ];
+          }
           return component.run(this.imageView!,this.refsBuffer!,this.imageWidth,this.imageHeight,qs,rotations!.slice(base+offset,base+offset+size),undefined,timing=>this.eccBatchTimings.push({...timing}));
         },(from,to)=>allocationFallbacks.push({from,to}));
         batch.push(...result.value);offset+=result.count;
@@ -423,7 +431,23 @@ export class WebGpuDetector {
     this.eccBatchPolicy.actualBatchMin=sizes.length?Math.min(...sizes):0;this.eccBatchPolicy.actualBatchMax=sizes.length?Math.max(...sizes):0;
     this.eccBatchPolicy.maxWorkingSetBytes=policy.batchSize*policy.inFlight*1180560+policy.inFlight*16;
     this.eccBatchPolicy.reusedBatches=this.eccBatchTimings.filter(t=>t.reusedBuffers).length;
-    traces.forEach((t,j)=>{output.set(t.quad.flat(),j*8);this.diagnostics.eccIterations+=t.iterations;this.diagnostics.eccConverged+=Number(t.converged);this.diagnostics.eccIterationLimits+=Number(t.iterationLimitReached);this.diagnostics.eccFailures+=Number(t.status<0);});
+    for (let j = 0; j < traces.length; j++) {
+      const t = traces[j];
+      const q = t.quad;
+      const dst = j * 8;
+      output[dst] = q[0][0];
+      output[dst + 1] = q[0][1];
+      output[dst + 2] = q[1][0];
+      output[dst + 3] = q[1][1];
+      output[dst + 4] = q[2][0];
+      output[dst + 5] = q[2][1];
+      output[dst + 6] = q[3][0];
+      output[dst + 7] = q[3][1];
+      this.diagnostics.eccIterations += t.iterations;
+      this.diagnostics.eccConverged += Number(t.converged);
+      this.diagnostics.eccIterationLimits += Number(t.iterationLimitReached);
+      this.diagnostics.eccFailures += Number(t.status < 0);
+    }
     this.diagnostics.eccCandidates+=count;this.diagnostics.eccMs+=performance.now()-start;
     return output;
   }
@@ -441,6 +465,8 @@ export class WebGpuDetector {
 
     this.refStatsBuffer = null;
     this.refsBuffer = null;
+    this.refStatsData = null;
+    this.refPatternData = null;
     this.imageTexture = null;
     this.imageView = null;
     this.sampler = null;
