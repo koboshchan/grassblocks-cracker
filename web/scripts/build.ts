@@ -17,6 +17,9 @@ await cp('public','dist',{recursive:true});
 for(const css of ['style.css','styles.css']){try{await access(css);await cp(css,'dist/'+css);}catch{}}
 for(const asset of ['solver.wasm'])await cp('artifacts/'+asset,'dist/'+asset);
 for(const asset of ['grass-pipeline.js','grass-pipeline.wasm'])await access('dist/vendor/'+asset);
+// Export contract: stale vendor glue lacking an ABI function breaks the preview at runtime.
+const glue=await readFile('dist/vendor/grass-pipeline.js','utf8');
+for(const fn of ['_grass_feature_seeds','_grass_detect','_grass_classify','_grass_result','_grass_pool_prepare','_grass_pool_trial','_grass_pool_submit','_grass_pool_finish'])if(!glue.includes(fn))throw new Error('Stale grass-pipeline glue missing export '+fn+'; run npm run build:wasm (wasm/build-pipeline.sh link)');
 try{await access('artifacts/kernel.wgsl');await cp('artifacts/kernel.wgsl','dist/kernel.wgsl');}catch{await cp('kernel.wgsl','dist/kernel.wgsl');}
 try{await access('src/detect/detect.wgsl');await cp('src/detect/detect.wgsl','dist/detect.wgsl');}catch{}
 await writeFile('dist/build-meta.json',JSON.stringify(result.metafile,null,2));
