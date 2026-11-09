@@ -81,7 +81,7 @@ export class BatchedGpuEcc {
    compute.setBindGroup(0,bind);
    const pass=(index:number,x:number,y=1)=>{compute.setPipeline(this.pipelines[index]);compute.dispatchWorkgroups(x,y);};
    pass(0,256,count);pass(1,256,count);pass(2,256,count);
-   for(let iteration=0;iteration<60;iteration++){pass(3,256,count);pass(4,count,6);pass(5,256,count);pass(6,count,80);pass(7,count);}
+   for(let iteration=0;iteration<60;iteration++){pass(3,256,count);pass(4,count,1);pass(5,256,count);pass(6,count,1);pass(7,count);}
    compute.end();
    if(hasTimestamps){
     encoder.resolveQuerySet(this.querySet!,0,2,this.resolveBuffer!,0);

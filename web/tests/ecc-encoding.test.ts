@@ -16,7 +16,7 @@ test('ECC compacts to one compute pass without changing the 303 dispatch schedul
  await component.run({}, {},256,256,[quad],[0]);
  assert.equal(begins,1);assert.equal(ends,1);assert.equal(submits,1);assert.equal(cleared.length,4);
  const expected=[[0,256,1],[1,256,1],[2,256,1]];
- for(let i=0;i<60;i++)expected.push([3,256,1],[4,1,6],[5,256,1],[6,1,80],[7,1,1]);
+ for(let i=0;i<60;i++)expected.push([3,256,1],[4,1,1],[5,256,1],[6,1,1],[7,1,1]);
  assert.deepEqual(dispatches,expected);assert.equal(component.lastHostTiming.passes,1);assert.equal(component.lastHostTiming.dispatches,303);
  component.destroy();
 });

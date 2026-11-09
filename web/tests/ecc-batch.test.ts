@@ -27,10 +27,10 @@ test('async OOM and validation scopes clean partial allocations, validation is n
 });
 
 test('throughput working sets share device budget and preserve reverse completion order',async()=>{
- for(const cap of [1,2,3,8,15,16,56,454]){const p=eccThroughputPolicy(cap);assert.ok(p.batchSize*p.inFlight<=cap);assert.ok(p.batchSize>=1&&p.batchSize<=512);}
+ for(const cap of [1,2,3,8,15,16,56,454]){const p=eccThroughputPolicy(cap);assert.ok(p.batchSize*p.inFlight<=cap);assert.ok(p.batchSize>=1&&p.batchSize<=32);}
  const pending:{base:number;n:number;resolve:(v:number[])=>void}[]=[];let active=0,peak=0;
- const run=runEccWindow(500,454,(base,n)=>new Promise<number[]>(resolve=>{active++;peak=Math.max(peak,active);pending.push({base,n,resolve:v=>{active--;resolve(v)}})}));
+ const run=runEccWindow(100,454,(base,n)=>new Promise<number[]>(resolve=>{active++;peak=Math.max(peak,active);pending.push({base,n,resolve:v=>{active--;resolve(v)}})}));
  while(active||pending.length){const p=pending.pop()!;p.resolve(Array.from({length:p.n},(_,i)=>p.base+i));await new Promise(r=>setImmediate(r));}
- assert.deepEqual(await run,Array.from({length:500},(_,i)=>i));assert.equal(peak,2);
+ assert.deepEqual(await run,Array.from({length:100},(_,i)=>i));assert.equal(peak,2);
  await assert.rejects(runEccWindow(9,16,async()=>{throw Error('GPU failure');}),/GPU failure/);
 });

@@ -13,7 +13,7 @@ struct State { base:array<f32,9>, warp:array<f32,9>, rho:f32,last:f32,status:f32
 @group(0) @binding(6) var<storage,read_write> jac:array<f32>;
 // 6 statistics then 64 H,8 imageProjection,8 templateProjection.
 @group(0) @binding(7) var<storage,read_write> sums:array<f32>;
-var<workgroup> reduce:array<f32,64>;
+var<workgroup> reduce:array<f32,128>;
 fn finite(v:f32)->bool{return abs(v)<=3.402823e38;}
 fn reflect101(x:i32)->i32 {if(x<0){return -x;}if(x>127){return 254-x;}return x;}
 fn pi(q:u32,plane:u32,x:i32,y:i32)->u32{return q*81920u+plane*16384u+u32(y)*128u+u32(x);}
@@ -53,11 +53,27 @@ fn patchSample(q:u32,plane:u32,x:f32,y:f32)->f32{
  let valid=finite(u)&&finite(v)&&abs(d)>0.0;let nx=i32(round(u));let ny=i32(round(v));let mask=valid&&nx>=0&&nx<128&&ny>=0&&ny<128;
  let at=(q*16384u+k)*5u;pixels[at]=patchSample(q,1u,u,v);pixels[at+1u]=patches[pi(q,2u,i32(k%128u),i32(k/128u))];pixels[at+2u]=patchSample(q,3u,u,v);pixels[at+3u]=patchSample(q,4u,u,v);pixels[at+4u]=select(0.0,1.0,mask);
 }
-@compute @workgroup_size(64) fn statistics(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
- let q=g.x;let metric=g.y;if(q>=p.count){return;}var value=0.0;
- for(var k=lane;k<16384u;k+=64u){let a=(q*16384u+k)*5u;let im=pixels[a];let t=pixels[a+1u];let m=pixels[a+4u];var z=m;
- if(metric==1u){z=im*m;}if(metric==2u){z=t*m;}if(metric==3u){z=im*im*m;}if(metric==4u){z=t*t*m;}if(metric==5u){z=im*t*m;}value+=z;}
- reduce[lane]=value;workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){reduce[lane]+=reduce[lane+stride];}workgroupBarrier();}if(lane==0u){sums[q*86u+metric]=reduce[0];}
+@compute @workgroup_size(128) fn statistics(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
+ let q=g.x;
+ let is_active = q < p.count && state[q].status == 0.0;
+ var s0=0.0; var s1=0.0; var s2=0.0; var s3=0.0; var s4=0.0; var s5=0.0;
+ if(is_active){
+  for(var k=lane;k<16384u;k+=128u){
+   let a=(q*16384u+k)*5u;
+   let im=pixels[a];let t=pixels[a+1u];let m=pixels[a+4u];
+   s0+=m; s1+=im*m; s2+=t*m; s3+=im*im*m; s4+=t*t*m; s5+=im*t*m;
+  }
+ }
+ var s = array<f32, 6>(s0, s1, s2, s3, s4, s5);
+ for(var metric=0u; metric<6u; metric++){
+  reduce[lane]=s[metric];
+  workgroupBarrier();
+  for(var stride=64u;stride>0u;stride/=2u){
+   if(lane<stride){reduce[lane]+=reduce[lane+stride];}
+   workgroupBarrier();
+  }
+  if(lane==0u && is_active){sums[q*86u+metric]=reduce[0];}
+ }
 }
 @compute @workgroup_size(64) fn jacobian(@builtin(global_invocation_id) id:vec3<u32>){
  let q=id.y;let k=id.x;if(q>=p.count||k>=16384u||state[q].status!=0.0){return;}let a=(q*16384u+k)*5u;let x=f32(k%128u);let y=f32(k/128u);let w=state[q].warp;let den=w[6]*x+w[7]*y+1.0;
@@ -67,11 +83,66 @@ fn patchSample(q:u32,plane:u32,x:f32,y:f32)->f32{
  let n=sums[q*86u];let mi=sums[q*86u+1u]/n;let mt=sums[q*86u+2u]/n;
  pixels[a]=pixels[a]-mi*pixels[a+4u];pixels[a+1u]=(pixels[a+1u]-mt)*pixels[a+4u];
 }
-@compute @workgroup_size(64) fn normal_equations(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
- let q=g.x;let metric=g.y;if(q>=p.count){return;}var value=0.0;
- for(var k=lane;k<16384u;k+=64u){let j=(q*16384u+k)*8u;let a=(q*16384u+k)*5u;
- if(metric<64u){value+=jac[j+metric/8u]*jac[j+metric%8u];}else if(metric<72u){value+=jac[j+metric-64u]*pixels[a];}else{value+=jac[j+metric-72u]*pixels[a+1u];}}
- reduce[lane]=value;workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){reduce[lane]+=reduce[lane+stride];}workgroupBarrier();}if(lane==0u){sums[q*86u+6u+metric]=reduce[0];}
+@compute @workgroup_size(128) fn normal_equations(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
+ let q=g.x;
+ let is_active = q < p.count && state[q].status == 0.0;
+ var h: array<f32, 52>;
+ if(is_active){
+  for(var k=lane;k<16384u;k+=128u){
+   let j=(q*16384u+k)*8u;let a=(q*16384u+k)*5u;
+   let j0=jac[j]; let j1=jac[j+1u]; let j2=jac[j+2u]; let j3=jac[j+3u];
+   let j4=jac[j+4u]; let j5=jac[j+5u]; let j6=jac[j+6u]; let j7=jac[j+7u];
+   let jv = array<f32, 8>(j0, j1, j2, j3, j4, j5, j6, j7);
+   let p0=pixels[a]; let p1=pixels[a+1u];
+   var idx = 0u;
+   for(var r=0u; r<8u; r++){
+    for(var c=r; c<8u; c++){
+     h[idx] += jv[r] * jv[c];
+     idx++;
+    }
+   }
+   for(var r=0u; r<8u; r++){
+    h[36u + r] += jv[r] * p0;
+    h[44u + r] += jv[r] * p1;
+   }
+  }
+ }
+ let o = q * 86u + 6u;
+ var idx = 0u;
+ for(var r=0u; r<8u; r++){
+  for(var c=r; c<8u; c++){
+   reduce[lane] = h[idx];
+   workgroupBarrier();
+   for(var stride=64u; stride>0u; stride/=2u){
+    if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
+    workgroupBarrier();
+   }
+   if(lane == 0u && is_active){
+    let val = reduce[0];
+    sums[o + r * 8u + c] = val;
+    sums[o + c * 8u + r] = val;
+   }
+   idx++;
+  }
+ }
+ for(var r=0u; r<8u; r++){
+  reduce[lane] = h[36u + r];
+  workgroupBarrier();
+  for(var stride=64u; stride>0u; stride/=2u){
+   if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
+   workgroupBarrier();
+  }
+  if(lane == 0u && is_active){ sums[o + 64u + r] = reduce[0]; }
+ }
+ for(var r=0u; r<8u; r++){
+  reduce[lane] = h[44u + r];
+  workgroupBarrier();
+  for(var stride=64u; stride>0u; stride/=2u){
+   if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
+   workgroupBarrier();
+  }
+  if(lane == 0u && is_active){ sums[o + 72u + r] = reduce[0]; }
+ }
 }
 @compute @workgroup_size(1) fn update(@builtin(global_invocation_id) id:vec3<u32>){
  let q=id.x;if(q>=p.count||state[q].status!=0.0){return;}let o=q*86u;let n=sums[o];if(state[q].iterations==0.0){state[q].firstMask=n;state[q].minMask=n;state[q].maxMask=n;}state[q].lastMask=n;state[q].minMask=min(state[q].minMask,n);state[q].maxMask=max(state[q].maxMask,n);let vi=sums[o+3u]-sums[o+1u]*sums[o+1u]/n;let vt=sums[o+4u]-sums[o+2u]*sums[o+2u]/n;let corr=sums[o+5u]-sums[o+1u]*sums[o+2u]/n;
