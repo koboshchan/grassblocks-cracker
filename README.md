@@ -15,3 +15,7 @@ See web/tests/RESEARCH.md for portable64-bit WGSL arithmetic decisions and test 
 The implemented hash is the modern vanilla getSeed plus Java Random rotation path. A separate legacy/Sodium-specific algorithm selector is not implemented. The known hill observations pass this vanilla path. Do not assume a screenshot made with a different resource pack or changed renderer rotation algorithm is supported.
 
 Build the static folder from web with npm ci then npm run build (Node20+ and Clang/LLD with wasm32 support). Serve web/dist over HTTPS or localhost. The included python3 web/serve.py server sets COOP/COEP and WebAssembly MIME headers. Alternatively, from the repository root run docker build -f web/Dockerfile -t grassblocks . and docker run --rm -p 18643:80 grassblocks. The Docker build has separate detection-WASM, CPU-cracker-WASM, validated-WebGPU and TypeScript-app stages and serves only static files with nginx. Native solvers are compiled separately on their respective platforms.
+
+License
+
+The independently rewritten project code is licensed under the MIT License; see LICENSE. Third-party code and assets keep their separate licenses and notices in web/public/THIRD-PARTY-NOTICES.txt and web/public/vendor/. This does not grant a license to the upstream TextureRotations project or Minecraft assets.
