@@ -82,3 +82,8 @@ body[data-mode=auto] [data-mode=manual],body[data-mode=manual] [data-mode=auto]{
 .bar.indeterminate::after{content:"";position:absolute;inset:0 auto 0 0;width:30%;background:var(--blue);border-radius:99px;animation:det-pulse 1.4s ease-in-out infinite}
 @keyframes det-pulse{from{transform:translateX(-110%)}to{transform:translateX(440%)}}
 @media(prefers-reduced-motion:reduce){.bar.indeterminate::after{animation:none;opacity:.4;width:100%}}
+
+.btn.big{width:100%;font:600 20px var(--font);letter-spacing:.04em;padding:14px 18px;min-height:56px;border-radius:14px}
+.startCard .range{display:flex;gap:8px;align-items:center;margin:12px 0 4px}
+.chip[aria-checked=true]{background:var(--blue);color:#fff}
+.chip:disabled{opacity:.5;cursor:default}

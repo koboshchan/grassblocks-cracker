@@ -199,3 +199,23 @@ test('diagnostic identity is per detection, includes exact decoded hash and dime
  assert.equal(d.decodedWidth,16);assert.equal(d.effectiveDetectHeight,16);assert.equal(d.resize,'none');
  assert.equal(r.diagnostics.classified,0);
 });
+
+test('auto without a WebGPU adapter falls back to WASM without blocking; auto init failure too',async()=>{
+ const u=await workerHarness();
+ delete u.scope.navigator.gpu;
+ const r=await u.detect({backend:'auto'});
+ assert.equal(u.detects.length,1);assert.match(String(r.fallbackReason),/WebGPU unavailable/);
+ const i=await workerHarness();
+ i.scope.createGpu=async()=>{throw Error('adapter failed');};
+ await i.detect({backend:'auto'});assert.equal(i.detects.length,1);
+});
+test('auto uses GPU when available, and GPU execution error falls back on the same input',async()=>{
+ const h=await workerHarness();
+ const r=await h.detect({backend:'auto'});
+ assert.match(r.backend,/^GPU ECC/);assert.equal(h.detects.length,0);
+ const e=await workerHarness();
+ e.scope.runGpu=async()=>{throw Error('GPU execution failed');};
+ const f=await e.detect({backend:'auto'},e.candidates);
+ assert.equal(e.detects.length,1);assert.match(String(f.fallbackReason),/GPU execution failed/);
+ assert.equal(e.detects[0].at(-2),1);
+});

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import {readBackend, saveBackend} from './detect/backend-choice';
+import { runStart, normalizeRange, rangeBounds, DEFAULT_RANGE } from './start-flow';
 import workerSource from 'inline-worker:./detect/worker';
 import { parseFormation, formatFormation, applyNorth, FBlock } from './formation';
 import { createSolver } from '../solver';
@@ -21,11 +21,7 @@ texReady.then(() => {
   document.querySelectorAll('.swatches canvas').forEach((cv: any) => { const g = cv.getContext('2d'); g.imageSmoothingEnabled = false; g.translate(8, 8); g.rotate(Number(cv.dataset.rot) * Math.PI / 2); g.drawImage(texImg, -8, -8, 16, 16); });
 });
 
-const detectorChoice = $('#detectorChoice');
-detectorChoice.value = readBackend(() => localStorage);
-detectorChoice.onchange = () => {
-  detectorChoice.value = saveBackend(() => localStorage, detectorChoice.value);
-};
+let range = DEFAULT_RANGE, starting = false, startToken = 0, pendingDetect: { resolve: (r: any) => void; reject: (e: Error) => void } | null = null;
 function showBackend(m: any) {
   if (m.backend) $('#detBackend').textContent = m.backend + (m.fallbackReason ? ': ' + m.fallbackReason : '');
 }
@@ -52,14 +48,14 @@ function startWorker() {
         }
       }
     }
-    else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); }
-    else if (m.type === 'result') onResult(m.result);
+    else if (m.type === 'error') { log('error: ' + m.text); setStatus('detector error', 'err'); $('#detBar').hidden = true; busyDet(false); const p = pendingDetect; pendingDetect = null; p?.reject(Error(String(m.text).split('\n')[0])); }
+    else if (m.type === 'result') { onResult(m.result); const p = pendingDetect; pendingDetect = null; p?.resolve({ blocks: m.result?.blocks?.length ? blocks : [], reason: m.result?.reason }); }
     else if (m.type === 'quadResult') onQuadResult(m);
   };
   worker.postMessage({ type: 'init', pipelineUrl: base + 'vendor/grass-pipeline.js' });
   setStatus('loading detector', 'busy');
 }
-function busyDet(b: boolean) { detectorChoice.disabled = b; $('#btnAuto').disabled = b || !ready || !img; $('#btnGrow').disabled = b || !ready || !img || quad.length < 4; if (!b) $('#detBar').hidden = true; }
+function busyDet(b: boolean) { if (!b) $('#detBar').hidden = true; upd(); }
 function onResult(r: any) {
   $('#detDebug').textContent = JSON.stringify({backend:r.backend,faces:r.blocks?.length,seeds:r.seeds?.length,seconds:r.seconds,diagnostics:r.diagnostics,trials:r.trials},null,2);
   busyDet(false); setStatus('ready', 'ok');
@@ -70,14 +66,15 @@ function onResult(r: any) {
   blocks = r.blocks.map((b: any) => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: 0, include: true, score: b.score, quad: b.quad }));
   log('found ' + blocks.length + ' faces in ' + sec + be); refresh();
 }
-function runDetect(seeds?: any) {
-  if (!img || !ref || !ready) return;
-  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
-  const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; busyDet(true); setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
-  worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value), backend: detectorChoice.value } }, [id.data.buffer]);
+function detectOnce(seeds?: any): Promise<any> {
+  if (!img || !ref || !ready || pendingDetect) return Promise.reject(Error('Detector is not ready.'));
+  return new Promise((resolve, reject) => { pendingDetect = { resolve, reject }; try { postDetect(seeds); } catch (e: any) { pendingDetect = null; reject(e); } });
 }
-$('#btnAuto').onclick = () => runDetect();
-$('#btnGrow').onclick = () => runDetect([quad.map(p => p.slice())]);
+function postDetect(seeds?: any) {
+  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
+  const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
+  worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value), backend: 'auto' } }, [id.data.buffer]);
+}
 
 /* image loading */
 async function load(src: Blob | string) {
@@ -155,24 +152,27 @@ function refresh() { table(); draw(); upd(); }
 
 /* search */
 function norths() { return [...document.querySelectorAll('.n')].filter((c: any) => c.checked).map((c: any) => +c.value); }
-function bounds() { const g = (id: string) => +$('#' + id).value; return { xmin: g('xmin'), xmax: g('xmax'), ymin: g('ymin'), ymax: g('ymax'), zmin: g('zmin'), zmax: g('zmax') }; }
+function yRange() { return { ymin: +$('#ymin').value, ymax: +$('#ymax').value }; }
+function bounds() { return rangeBounds(range, yRange()); }
 const SET = '.group input,.group select,.chip,#tbl input,#tbl button,#btnAdd,#btnImport';
 let running = false, paused = false, resumeFn: (() => void) | null = null, pausePromise: Promise<void> | null = null, activeMs = 0, lastTick = 0, ticker = 0;
 function fmt(s: number) { if (!isFinite(s)) return '-'; s = Math.round(s); return s >= 3600 ? Math.floor(s / 3600) + 'h ' + Math.floor(s % 3600 / 60) + 'm' : Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
-function lock(b: boolean) { document.querySelectorAll(SET).forEach((e: any) => e.disabled = b); $('#nAny').disabled = b; document.querySelectorAll('.n').forEach((e: any) => e.disabled = b); $('#stopFirst').disabled = b; }
+function lock(b: boolean) { document.querySelectorAll('.chip').forEach((e: any) => e.disabled = b); $('#thr').disabled = b; document.querySelectorAll(SET).forEach((e: any) => e.disabled = b); $('#nAny').disabled = b; document.querySelectorAll('.n').forEach((e: any) => e.disabled = b); $('#stopFirst').disabled = b; }
 function maxRes() { const n = +$('#maxres').value; return Number.isInteger(n) && n >= 1 && n <= 100000 ? n : null; }
 function upd() {
-  $('#btnRun').disabled = !blocks.some(b => b.include) || running;
+  $('#btnStart').disabled = starting || running || !(img ? ready : blocks.some(b => b.include));
   const b = bounds(), n = norths(); $('#cmd').classList.toggle('on', blocks.length > 0);
   const r = [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
   $('#cmd').textContent = 'cuda:  grass_solver.exe --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nmetal: ./grass_solver --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nNative solvers read the same raw formation.txt as browser mode.' + (n.length > 1 && n.length < 4 ? '\nRepeat with --north ' + n.slice(1).join(' and --north ') + ' for the other selected orientations.' : '');
-  $('#btnAddFace').disabled = quad.length < 4 || !ready || !img;
+  $('#btnAddFace').disabled = quad.length < 4 || !ready || !img || starting;
 }
 document.querySelectorAll('.group input,.n').forEach(e => e.addEventListener('input', upd));
 $('#nAny').onchange = (e: any) => document.querySelectorAll('.n').forEach((c: any) => c.checked = e.target.checked);
 document.querySelectorAll('.n').forEach((c: any) => c.addEventListener('change', () => { $('#nAny').checked = norths().length === 4; }));
 $('#nAny').checked = true;
-document.querySelectorAll('.chip').forEach((c: any) => c.onclick = () => { const r = +c.dataset.r; ['xmin', 'zmin'].forEach(i => $('#' + i).value = -r); ['xmax', 'zmax'].forEach(i => $('#' + i).value = r); upd(); });
+function setRange(r: number) { range = normalizeRange(r); document.querySelectorAll('.chip').forEach((c: any) => c.setAttribute('aria-checked', String(+c.dataset.r === range))); upd(); }
+document.querySelectorAll('.chip').forEach((c: any) => c.onclick = () => { if (!starting && !running) setRange(+c.dataset.r); });
+setRange(DEFAULT_RANGE);
 function tick() { const now = performance.now(); if (!paused) activeMs += now - lastTick; lastTick = now; $('#sEl').textContent = fmt(activeMs / 1000) + (paused ? ' (paused)' : ''); }
 $('#btnPause').onclick = () => {
   if (!running) return;
@@ -180,7 +180,7 @@ $('#btnPause').onclick = () => {
   else { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; $('#btnPause').textContent = 'Pause'; setStatus('searching', 'busy'); }
   tick();
 };
-$('#btnCancel').onclick = () => { abort?.abort(); if (paused) { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; } };
+$('#btnCancel').onclick = () => { abort?.abort(); if (pendingDetect) { const p = pendingDetect; pendingDetect = null; worker?.terminate(); worker = null; ready = false; p.reject(Error('Cancelled')); startWorker(); } if (paused) { paused = false; resumeFn?.(); resumeFn = null; pausePromise = null; } };
 const FACING = ['north', 'east', 'south', 'west']; // applyNorth: (x,z)->(-z,x) per step = clockwise quarter turn
 function matchItem(m: any): HTMLElement {
   const li = document.createElement('li'); li.className = 'match';
@@ -190,24 +190,53 @@ function matchItem(m: any): HTMLElement {
   b.onclick = async () => { try { await navigator.clipboard.writeText('/tp @s ' + m.x + ' ' + m.y + ' ' + m.z); b.textContent = 'Copied'; } catch { b.textContent = 'Copy failed'; } setTimeout(() => b.textContent = 'Copy /tp', 1500); };
   li.append(t, b); return li;
 }
-$('#btnRun').onclick = async () => {
+async function doSearch(bl: any[], bnd: any, mm: number, signal: AbortSignal) {
+  const opts = (be: any) => ({ ...bnd, north: norths(), signal, maxMatches: mm, stopOnFirst: $('#stopFirst').checked, waitIfPaused: () => pausePromise || Promise.resolve(),
+    onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); tick(); const rate = p.done / Math.max(1e-6, activeMs / 1000); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
+    onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { $('#matches').appendChild(matchItem(m)); } } });
+  const rows = bl.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side }));
+  if (!solver) solver = await createSolver({ backend: 'auto' });
+  try { return await solver.search(rows, opts(solver.backend)); }
+  catch (e: any) {
+    if (signal.aborted || solver?.backend !== 'webgpu') throw e;
+    // GPU execution error: rerun the same input on the WASM solver.
+    solver.destroy?.(); solver = await createSolver({ backend: 'cpu' }); nm = 0; $('#matches').innerHTML = ''; $('#sMatch').textContent = '0';
+    $('#runStats').textContent = 'GPU error, retrying on WASM: ' + (e.message || e);
+    return await solver.search(rows, opts('cpu'));
+  }
+}
+let nm = 0;
+$('#btnStart').onclick = async () => {
+  if (starting || running) return;
   const mm = maxRes(); if (mm === null) { $('#runStats').textContent = 'Max results must be a whole number from 1 to 100000.'; return; }
-  const be = $('#backend').value; if (be === 'gpu' && !('gpu' in navigator)) { $('#runStats').textContent = 'WebGPU is not available in this browser. Pick WASM or use the native download below.'; return; }
   if (!norths().length) { $('#runStats').textContent = 'Choose at least one north.'; return; }
-  abort = new AbortController(); running = true; paused = false; ['sPct','sPos','sRate','sEta','sEl'].forEach(id => $('#' + id).textContent = '-'); activeMs = 0; lastTick = performance.now(); lock(true);
-  $('#btnRun').disabled = true; $('#btnCancel').disabled = false; $('#btnPause').disabled = false; $('#btnPause').textContent = 'Pause'; $('#matches').innerHTML = ''; $('#runBar').hidden = false; $('#runBar i').style.width = '0'; $('#sMatch').textContent = '0'; $('#runStats').textContent = 'Running'; setStatus('searching', 'busy');
-  ticker = setInterval(tick, 250) as any; let nm = 0;
-  try {
-    if (!solver || solver.__be !== be) { solver?.destroy?.(); solver = null; solver = await createSolver({ backend: be }); solver.__be = be; }
-    const r = await solver.search(blocks.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side })), { ...bounds(), north: norths(), signal: abort.signal, maxMatches: mm, stopOnFirst: $('#stopFirst').checked, waitIfPaused: () => pausePromise || Promise.resolve(),
-      onProgress: (p: any) => { const f = p.total ? p.done / p.total : 0; $('#runBar i').style.width = (100 * f) + '%'; $('#sPct').textContent = (100 * f).toFixed(1) + '%'; $('#sPos').textContent = p.done.toLocaleString() + ' / ' + p.total.toLocaleString(); tick(); const rate = p.done / Math.max(1e-6, activeMs / 1000); $('#sRate').textContent = rate >= 1e9 ? (rate / 1e9).toFixed(2) + ' G/s' : rate >= 1e6 ? (rate / 1e6).toFixed(1) + ' M/s' : Math.round(rate) + '/s'; $('#sEta').textContent = rate > 0 ? fmt((p.total - p.done) / rate) : '-'; },
-      onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { $('#matches').appendChild(matchItem(m)); } } });
-    tick(); $('#sMatch').textContent = String(r.matches.length);
+  const token = ++startToken; starting = true; abort = new AbortController(); const myAbort = abort; paused = false; nm = 0;
+  ['sPct','sPos','sRate','sEta','sEl'].forEach(id => $('#' + id).textContent = '-'); $('#sMatch').textContent = '0'; $('#matches').innerHTML = '';
+  $('#btnCancel').disabled = false; $('#runStats').textContent = 'Starting'; lock(true); upd();
+  const finishRun = () => { clearInterval(ticker); running = false; paused = false; pausePromise = null; $('#btnPause').disabled = true; $('#btnPause').textContent = 'Pause'; $('#runBar').hidden = true; };
+  const res = await runStart({
+    mode: document.body.dataset.mode === 'manual' ? 'manual' : 'auto', hasImage: !!img, blocks, quad, range, y: yRange(), isCancelled: () => myAbort.signal.aborted,
+    deps: {
+      onStage: (st) => {
+        if (st === 'detect') { $('#detLog').textContent = ''; $('#runStats').textContent = 'Detecting'; setStatus('detecting', 'busy'); }
+        else {
+          running = true; activeMs = 0; lastTick = performance.now(); ticker = setInterval(tick, 250) as any;
+          $('#btnPause').disabled = false; $('#runBar').hidden = false; $('#runBar i').style.width = '0'; $('#runStats').textContent = 'Searching ±' + range.toLocaleString(); setStatus('searching', 'busy');
+        }
+      },
+      detect: (req) => detectOnce(req.seeds),
+      search: (bl, bnd) => doSearch(bl, bnd, mm, myAbort.signal),
+    },
+  });
+  if (token !== startToken) return;
+  const wasRunning = running; finishRun();
+  if (res.status === 'done' && res.result) {
+    const r = res.result; tick(); $('#sMatch').textContent = String(r.matches.length);
     $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + '. ' + r.matches.length + ' match(es).';
     if (!r.cancelled && !r.stopped) $('#sPct').textContent = '100%';
-  } catch (e: any) { $('#runStats').textContent = 'Error: ' + (e.message || e); }
-  clearInterval(ticker); running = false; paused = false; abort = null; pausePromise = null; lock(false);
-  $('#btnCancel').disabled = true; $('#btnPause').disabled = true; $('#btnPause').textContent = 'Pause'; $('#runBar').hidden = true; setStatus('ready', 'ok'); upd();
+  } else if (res.status === 'cancelled') $('#runStats').textContent = 'Cancelled';
+  else $('#runStats').textContent = res.status === 'error' ? 'Error: ' + res.message : (res.message || 'Nothing to do.');
+  starting = false; abort = null; lock(false); $('#btnCancel').disabled = true; $('#detBar').hidden = true; setStatus(ready ? 'ready' : 'loading detector', ready ? 'ok' : 'busy'); upd();
 };
 
 /* mode + manual single face */
@@ -234,7 +263,7 @@ $('#btnAddFace').onclick = () => {
       onQuadResult(m);
     } else prev.call(worker, e);
   };
-  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, opts: {backend: detectorChoice.value}, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
+  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, opts: {backend: 'auto'}, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
 };
 setMode('auto');
 texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();

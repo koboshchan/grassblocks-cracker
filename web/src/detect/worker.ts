@@ -22,14 +22,18 @@ function fallback(reason: string) {
 }
 async function chooseGpu(backend: unknown): Promise<boolean> {
   fallbackReason = "";
-  if (normalizeBackend(backend) !== "webgpu") return false;
+  const choice = normalizeBackend(backend);
+  if (choice === "wasm") return false;
   try {
     gpuInit ??= initGpu(nativeUrl);
     await gpuInit;
     if (webgpuReady && webgpuDetector) return true;
-    throw Error("WebGPU unavailable or initialization failed; GPU selection does not fall back to WASM");
-  } catch (e) { throw e; }
-  return false;
+    throw Error("WebGPU unavailable or initialization failed");
+  } catch (e) {
+    // auto never blocks on a missing adapter; strict webgpu still errors.
+    if (choice === "auto") { gpuInit = null; fallback(String((e as any)?.message || e)); return false; }
+    throw e;
+  }
 }
 // GPU execution errors (validation, device loss, pending-map misuse) fall back to the same-input WASM path.
 function useGpuFallback(e: any) {

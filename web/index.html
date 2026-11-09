@@ -33,21 +33,34 @@
   </section>
 
   <aside class="panel">
-    <section class="card" id="stepDetect">
-      <h2><b>1</b> Detect</h2>
-      <p class="small">Automatic mode matches features against the vanilla 16x16 texture, then verifies every face by pixel correlation. It can fail on hard shots. Then draw one tile quad (click its 4 corners, then drag to adjust) and grow from it.</p>
-      <div class="row"><label class="small" for="detectorChoice">Detector <select id="detectorChoice" aria-describedby="detectorHelp"><option value="wasm">WASM (default)</option><option value="webgpu">WebGPU ECC (experimental)</option></select></label><span class="small" id="detectorHelp">WebGPU may miss faces. GPU errors stop detection. Automatic proposals still use native SIFT.</span><span class="small" id="detBackend" role="status" aria-live="polite"></span></div>
-      <div data-mode="auto"><div class="row"><button id="btnAuto" class="btn primary" disabled>Auto detect</button><label class="small">Accept score <input id="thr" type="number" min="0.5" max="0.99" step="0.01" value="0.88" style="width:80px"></label></div></div>
-      <div data-mode="manual"><p class="small">Click Draw tile quad, then the 4 corners of one grass-top face clockwise from top-left. Enter its grid x, height y and z, then Add face; rotation is classified from the pixels. Grow tries to find neighbours from it. Detected rows stay editable in the table.</p>
-      <div class="group"><div class="line"><span>x y z</span><input id="mx" type="number" step="1" value="0" aria-label="x"><input id="mz" type="number" step="1" value="0" aria-label="z"></div><div class="opt"><span>Height y</span><input id="my" type="number" step="1" value="0"></div></div>
-      <div class="row"><button id="btnAddFace" class="btn primary" disabled>Add face</button><button id="btnGrow" class="btn" disabled>Grow from quad</button></div></div>
+    <section class="card startCard">
+      <button id="btnStart" class="btn primary big" disabled>START</button>
+      <div class="range" role="radiogroup" aria-label="Search range"><span class="small">Range ±</span><button type="button" class="chip" role="radio" aria-checked="false" data-r="2000">2K</button><button type="button" class="chip" role="radio" aria-checked="true" data-r="10000">10K</button><button type="button" class="chip" role="radio" aria-checked="false" data-r="100000">100K</button></div>
+      <div class="row"><button id="btnPause" class="btn" disabled>Pause</button><button id="btnCancel" class="btn danger" disabled>Cancel</button><span class="small" id="detBackend" role="status" aria-live="polite"></span></div>
       <div class="bar" id="detBar" role="progressbar" aria-label="Detection progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i></i></div>
+      <div class="bar" id="runBar" hidden><i></i></div>
+      <div class="stats"><div><b id="sPct">0%</b>progress</div><div><b id="sPos">0 / 0</b>positions</div><div><b id="sRate">-</b>rate</div><div><b id="sEta">-</b>ETA</div><div><b id="sEl">0:00</b>elapsed (active)</div><div><b id="sMatch">0</b>matches</div><div class="wide" id="runStats">Idle</div></div>
+      <ol class="matches mono" id="matches"></ol>
+      <details><summary class="small">Search options</summary>
+      <div class="group">
+        <div class="line"><span>y</span><input id="ymin" type="number" value="-64" aria-label="y min"><input id="ymax" type="number" value="320" aria-label="y max"></div>
+        <div class="opt"><span>North</span><div class="north" role="group" aria-label="North directions"><label><input type="checkbox" id="nAny">Any</label><label><input type="checkbox" class="n" value="0" checked>0</label><label><input type="checkbox" class="n" value="1" checked>1</label><label><input type="checkbox" class="n" value="2" checked>2</label><label><input type="checkbox" class="n" value="3" checked>3</label></div></div>
+        <div class="opt"><span>Max results</span><input id="maxres" type="number" min="1" max="100000" step="1" value="1000"></div>
+        <div class="opt"><span>Stop at first match</span><input id="stopFirst" type="checkbox"></div>
+      </div></details>
+    </section>
+    <section class="card">
+      <h2>Detection</h2>
+      <p class="small" data-mode="auto">Matches features against the vanilla 16x16 texture, then verifies every face by pixel correlation. Hard shots can fail; switch to Manual and draw one tile quad.</p>
+      <div data-mode="auto"><label class="small">Accept score <input id="thr" type="number" min="0.5" max="0.99" step="0.01" value="0.88" style="width:80px"></label></div>
+      <div data-mode="manual"><p class="small">Click Draw tile quad, then the 4 corners of one grass-top face clockwise from top-left. START grows from that quad. To add a single face by hand, enter its grid x, height y and z, then Add face; rotation is classified from the pixels.</p>
+      <div class="group"><div class="line"><span>x z</span><input id="mx" type="number" step="1" value="0" aria-label="x"><input id="mz" type="number" step="1" value="0" aria-label="z"></div><div class="opt"><span>Height y</span><input id="my" type="number" step="1" value="0"></div></div>
+      <div class="row"><button id="btnAddFace" class="btn" disabled>Add face</button></div></div>
       <details><summary class="small">Detector diagnostics</summary><button id="btnCopyDetDebug" type="button" class="secondary" aria-label="Copy detector diagnostic readout">Copy diagnostics</button><pre class="log on" id="detDebug" aria-live="polite">No detection run yet.</pre></details>
       <pre class="log" id="detLog" aria-live="polite"></pre>
     </section>
-
     <section class="card">
-      <h2><b>2</b> Formation <small id="count">0 blocks</small></h2>
+      <h2>Formation <small id="count">0 blocks</small></h2>
       <div class="row">
         <button id="btnImport" class="btn ghost">Import</button><input id="importFile" type="file" accept=".txt,text/plain" hidden>
         <button id="btnExport" class="btn ghost">Export formation.txt</button>
@@ -57,35 +70,15 @@
       <p class="small">Coordinates are relative to the detected plane and heights are steps from it. The file is the base north 0 frame; the solver tries every north you tick below.</p>
     </section>
 
+    
     <section class="card">
-      <h2><b>3</b> Search</h2>
-      <div class="group">
-        <div class="line"><span>x</span><input id="xmin" type="number" value="-2000" aria-label="x min"><input id="xmax" type="number" value="2000" aria-label="x max"></div>
-        <div class="line"><span>y</span><input id="ymin" type="number" value="-64" aria-label="y min"><input id="ymax" type="number" value="320" aria-label="y max"></div>
-        <div class="line"><span>z</span><input id="zmin" type="number" value="-2000" aria-label="z min"><input id="zmax" type="number" value="2000" aria-label="z max"></div>
-        <div class="opt"><span>North</span><div class="north" role="group" aria-label="North directions"><label><input type="checkbox" id="nAny">Any</label><label><input type="checkbox" class="n" value="0" checked>0</label><label><input type="checkbox" class="n" value="1" checked>1</label><label><input type="checkbox" class="n" value="2" checked>2</label><label><input type="checkbox" class="n" value="3" checked>3</label></div></div>
-        <div class="opt"><span>Backend</span><select id="backend"><option value="auto">Auto</option><option value="gpu">WebGPU</option><option value="cpu">WASM (CPU)</option></select></div>
-        <div class="opt"><span>Max results</span><input id="maxres" type="number" min="1" max="100000" step="1" value="1000"></div>
-        <div class="opt"><span>Stop at first match</span><input id="stopFirst" type="checkbox"></div>
-      </div>
-      <div class="row presets small">Range <button class="chip" data-r="1000">±1k</button><button class="chip" data-r="10000">±10k</button><button class="chip" data-r="100000">±100k</button></div>
-      <div class="row">
-        <button id="btnRun" class="btn primary" disabled>Run</button>
-        <button id="btnPause" class="btn" disabled>Pause</button>
-        <button id="btnCancel" class="btn danger" disabled>Cancel</button>
-      </div>
-      <div class="bar" id="runBar" hidden><i></i></div>
-      <div class="stats"><div><b id="sPct">0%</b>progress</div><div><b id="sPos">0 / 0</b>positions</div><div><b id="sRate">-</b>rate</div><div><b id="sEta">-</b>ETA</div><div><b id="sEl">0:00</b>elapsed (active)</div><div><b id="sMatch">0</b>matches</div><div class="wide" id="runStats">Idle</div></div>
-      <ol class="matches mono" id="matches"></ol>
-    </section>
-
-    <section class="card">
-      <h2><b>4</b> Or run natively</h2>
+      <h2>Or run natively</h2>
       <p class="small">Same math on your own GPU. Keep the header next to the source.</p>
       <div class="row"><button id="btnNative" class="btn ghost">Download formation.txt</button></div>
       <p class="small links"><a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/cuda/grass_solver.cu">cuda/grass_solver.cu</a> · <a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/cuda/solver_common.h">solver_common.h</a> · <a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/cuda/README.md">cuda README</a><br><a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/metal/grass_solver.mm">metal/grass_solver.mm</a> · <a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/metal/solver_common.h">solver_common.h</a> · <a href="https://github.com/koboshchan/grassblocks-cracker/blob/main/metal/README.md">metal README</a></p>
       <pre class="mono cmd" id="cmd"></pre>
     </section>
+  
   </aside>
 </main>
 <script src="app.js" defer></script>
