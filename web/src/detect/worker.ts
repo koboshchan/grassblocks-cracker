@@ -117,8 +117,6 @@ self.onmessage = async (ev: MessageEvent) => {
     detecting = true;
     ownsDetection = true;
     let useGpu = await chooseGpu(backend);
-    const pixelSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',data)),b=>b.toString(16).padStart(2,'0')).join('');
-    const inputIdentity={decodedWidth:m.width,decodedHeight:m.height,effectiveDetectWidth:m.width,effectiveDetectHeight:m.height,pixelSha256,resize:'none',settings:detectOpts,reference:m.ref};
     if (m.type === 'classifyQuad') {
       if (useGpu && webgpuDetector) {
         try {
@@ -145,6 +143,12 @@ self.onmessage = async (ev: MessageEvent) => {
       post({ type: 'quadResult', ...backendResult({...pipeline.classifyQuad(data, m.width, m.height, m.ref, m.quad), backend:pipeline.detectorBackend}) });
       return;
     }
+    const shaPromise = crypto.subtle.digest('SHA-256', data);
+    const getInputIdentity = async () => ({
+      decodedWidth: m.width, decodedHeight: m.height, effectiveDetectWidth: m.width, effectiveDetectHeight: m.height,
+      pixelSha256: Array.from(new Uint8Array(await shaPromise), b => b.toString(16).padStart(2, '0')).join(''),
+      resize: 'none', settings: detectOpts, reference: m.ref,
+    });
     if (useGpu && webgpuDetector) {
       try {
         post({ type: 'progress', backend: 'WebGPU experimental', text: 'Detecting grass via WebGPU (experimental)' });
@@ -165,7 +169,7 @@ self.onmessage = async (ev: MessageEvent) => {
           } }, progress
         ));
         if (!result || !Array.isArray(result.blocks)) throw Error('Invalid WebGPU result');
-        post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{inputIdentity,counterSemantics:"per-detection submitted classifier quads; ECC host timers overlap; prior builds accumulated detector-lifetime counters",adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics,eccBatchPolicy:webgpuDetector.eccBatchPolicy,eccBatchTimings:webgpuDetector.eccBatchTimings, timingNote:"host wall measurements overlap; GPU timestamp unavailable", featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
+        post({type:'result',result:{...result,backend:'GPU ECC + stable correlation (native SIFT proposals only)', diagnostics:{inputIdentity:await getInputIdentity(),counterSemantics:"per-detection submitted classifier quads; ECC host timers overlap; prior builds accumulated detector-lifetime counters",adapter:webgpuDetector.adapterInfo, ...webgpuDetector.diagnostics,eccBatchPolicy:webgpuDetector.eccBatchPolicy,eccBatchTimings:webgpuDetector.eccBatchTimings, timingNote:"host wall measurements overlap; GPU timestamp unavailable", featureDependency:'native SIFT proposals only; not pure GPU automatic detection'},transportSeconds:(performance.now()-started)/1000}});
         return;
       } catch (e:any) { useGpuFallback(e); useGpu = false; }
     }
@@ -179,7 +183,7 @@ self.onmessage = async (ev: MessageEvent) => {
     } else {
       result = pipeline.detect(data,m.width,m.height,m.ref,detectOpts,m.seeds || []);
     }
-    post({ type: 'result', result: backendResult({ ...result, diagnostics:{inputIdentity}, transportSeconds: (performance.now() - started) / 1000 }) });
+    post({ type: 'result', result: backendResult({ ...result, diagnostics:{inputIdentity:await getInputIdentity()}, transportSeconds: (performance.now() - started) / 1000 }) });
   } catch (e: any) {
     post({ type: 'error', backend: pipeline.detectorBackend, text: String(e?.stack || e?.message || e) });
   } finally {

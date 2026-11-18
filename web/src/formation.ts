@@ -4,7 +4,7 @@ import { validate } from '../hash';
 const NB = { xmin: 0, xmax: 0, ymin: 0, ymax: 0, zmin: 0, zmax: 0, north: [0] };
 
 function check(blocks: FBlock[]) { // reuse the solver's own validator
-  validate(blocks.map(k => ({ x: k.x, y: k.y, z: k.z, rotation: k.rotation, is_side: k.is_side })), NB as any);
+  validate(blocks as any, NB as any);
 }
 
 /** Strict parse: integers only, |x,y,z| <= 1e6, rotation 0..3 (0..1 if side), side 0/1. 4-field legacy lines mean is_side 0. */

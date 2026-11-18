@@ -6,7 +6,7 @@ import { createSolver } from '../solver';
 
 const $ = (s: string) => document.querySelector(s) as any;
 const view = $('#view') as HTMLCanvasElement, ctx = view.getContext('2d')!;
-let img: HTMLImageElement | ImageBitmap | null = null, blocks: FBlock[] = [], sel = -1, quad: number[][] = [], drawing = false, drag = -1, solver: any = null, abort: AbortController | null = null, worker: Worker | null = null, ready = false, ref: number[][] | null = null;
+let img: HTMLImageElement | ImageBitmap | null = null, cachedPixels: Uint8ClampedArray | null = null, blocks: FBlock[] = [], sel = -1, quad: number[][] = [], drawing = false, drag = -1, rafId = 0, solver: any = null, abort: AbortController | null = null, worker: Worker | null = null, ready = false, ref: number[][] | null = null;
 
 function setStatus(t: string, k = '') { $('#statusText').textContent = t; $('#dot').className = 'dot ' + k; }
 function log(t: string) { const l = $('#detLog'); l.classList.add('on'); l.textContent += t + '\n'; l.scrollTop = 1e9; }
@@ -70,10 +70,18 @@ function detectOnce(seeds?: any): Promise<any> {
   if (!img || !ref || !ready || pendingDetect) return Promise.reject(Error('Detector is not ready.'));
   return new Promise((resolve, reject) => { pendingDetect = { resolve, reject }; try { postDetect(seeds); } catch (e: any) { pendingDetect = null; reject(e); } });
 }
+function getPixelsBuffer(): ArrayBuffer {
+  if (!cachedPixels) {
+    const c = document.createElement('canvas'); c.width = img!.width; c.height = img!.height;
+    const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
+    cachedPixels = x.getImageData(0, 0, c.width, c.height).data;
+  }
+  return cachedPixels.slice().buffer;
+}
 function postDetect(seeds?: any) {
-  const c = document.createElement('canvas'); c.width = img.width; c.height = img.height; const x = c.getContext('2d')!; x.drawImage(img as any, 0, 0);
-  const id = x.getImageData(0, 0, c.width, c.height); $('#detLog').textContent = ''; setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
-  worker!.postMessage({ type: 'detect', width: c.width, height: c.height, buffer: id.data.buffer, ref, seeds, opts: { accept: Number($('#thr').value), backend: 'auto' } }, [id.data.buffer]);
+  const buf = getPixelsBuffer();
+  $('#detLog').textContent = ''; setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
+  worker!.postMessage({ type: 'detect', width: img!.width, height: img!.height, buffer: buf, ref, seeds, opts: { accept: Number($('#thr').value), backend: 'auto' } }, [buf]);
 }
 
 /* image loading */
@@ -84,6 +92,8 @@ async function load(src: Blob | string) {
   try {
     await new Promise((res, rej) => { im.onload = res; im.onerror = () => rej(new Error('That file could not be decoded as an image.')); im.src = url; });
     if (im.width * im.height > 16_000_000 || !im.width || !im.height) throw new Error('Screenshot limit is16 million pixels. Crop to the grass you want to inspect.');
+    const c = document.createElement('canvas'); c.width = im.width; c.height = im.height; const x = c.getContext('2d')!; x.drawImage(im, 0, 0);
+    cachedPixels = x.getImageData(0, 0, im.width, im.height).data;
     img = im; blocks = []; quad = []; sel = -1; view.width = im.width; view.height = im.height; $('#wrap').classList.add('has'); $('#hint').textContent = im.width + 'x' + im.height; refresh(); busyDet(false);
   } finally { if (owned) URL.revokeObjectURL(url); }
 }
@@ -104,14 +114,15 @@ $('#btnHill').onclick = async () => {
 function draw() {
   ctx.clearRect(0, 0, view.width, view.height); if (!img) return; ctx.drawImage(img as any, 0, 0);
   const lw = Math.max(1.5, view.width / 500);
+  const fs = Math.max(9, view.width / 90); ctx.font = '600 ' + fs + 'px ui-monospace,monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   blocks.forEach((b, i) => {
     if (!b.quad) return; ctx.beginPath(); b.quad.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath();
     ctx.lineWidth = lw; ctx.strokeStyle = !b.include ? '#888' : i === sel ? '#ffd43b' : '#3ddc63'; if (i === sel) { ctx.fillStyle = '#ffd43b55'; ctx.fill(); } ctx.stroke();
     const c = b.quad.reduce((s, p) => [s[0] + p[0] / 4, s[1] + p[1] / 4], [0, 0]);
-    const q = b.quad, up = [(q[0][0] + q[1][0]) / 2, (q[0][1] + q[1][1]) / 2]; // texture up edge midpoint at rotation 0
+    const q = b.quad;
     const e = (r => [q[r][0], q[r][1], q[(r + 1) % 4][0], q[(r + 1) % 4][1]])((4 - b.rotation) % 4), m = [(e[0] + e[2]) / 2, (e[1] + e[3]) / 2];
     ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.lineTo(c[0] + (m[0] - c[0]) * .7, c[1] + (m[1] - c[1]) * .7); ctx.strokeStyle = '#fff'; ctx.lineWidth = lw; ctx.stroke();
-    ctx.fillStyle = '#000a'; const fs = Math.max(9, view.width / 90); ctx.font = '600 ' + fs + 'px ui-monospace,monospace'; const t = b.y + ' r' + b.rotation; ctx.fillRect(c[0] - fs * 1.5, c[1] - fs * .6, fs * 3, fs * 1.2); ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(t, c[0], c[1]);
+    ctx.fillStyle = '#000a'; const t = b.y + ' r' + b.rotation; ctx.fillRect(c[0] - fs * 1.5, c[1] - fs * .6, fs * 3, fs * 1.2); ctx.fillStyle = '#fff'; ctx.fillText(t, c[0], c[1]);
   });
   if (quad.length) { ctx.beginPath(); quad.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); if (quad.length === 4) ctx.closePath(); ctx.strokeStyle = '#d9531e'; ctx.lineWidth = lw * 1.5; ctx.stroke(); quad.forEach((p, k) => { ctx.beginPath(); ctx.arc(p[0], p[1], lw * 3, 0, 7); ctx.fillStyle = '#d9531e'; ctx.fill(); ctx.fillStyle = '#fff'; ctx.font = '700 ' + lw * 4 + 'px sans-serif'; ctx.fillText(String(k + 1), p[0] + lw * 5, p[1] - lw * 5); }); }
 }
@@ -124,7 +135,12 @@ view.onpointerdown = e => {
   if (drag >= 0) { view.setPointerCapture(e.pointerId); return; }
   const i = blocks.findIndex(b => b.quad && inside(b.quad, p)); sel = i; refresh(); if (i >= 0) document.querySelector('#tbl tr[data-i="' + i + '"]')?.scrollIntoView({ block: 'nearest' });
 };
-view.onpointermove = e => { if (drag >= 0) { quad[drag] = pt(e); draw(); } };
+view.onpointermove = e => {
+  if (drag >= 0) {
+    quad[drag] = pt(e);
+    if (!rafId) rafId = requestAnimationFrame(() => { rafId = 0; draw(); });
+  }
+};
 view.onpointerup = () => { drag = -1; };
 $('#btnQuad').onclick = () => { drawing = true; quad = []; $('#btnQuad').setAttribute('aria-pressed', 'true'); $('#hint').textContent = 'click 4 corners clockwise from top-left of the tile'; busyDet(false); draw(); };
 $('#btnClearQuad').onclick = () => { quad = []; drawing = false; $('#btnQuad').setAttribute('aria-pressed', 'false'); busyDet(false); draw(); };
@@ -160,11 +176,14 @@ function fmt(s: number) { if (!isFinite(s)) return '-'; s = Math.round(s); retur
 function lock(b: boolean) { document.querySelectorAll('.chip').forEach((e: any) => e.disabled = b); $('#thr').disabled = b; document.querySelectorAll(SET).forEach((e: any) => e.disabled = b); $('#nAny').disabled = b; document.querySelectorAll('.n').forEach((e: any) => e.disabled = b); $('#stopFirst').disabled = b; }
 function maxRes() { const n = +$('#maxres').value; return Number.isInteger(n) && n >= 1 && n <= 100000 ? n : null; }
 function upd() {
-  $('#btnStart').disabled = starting || running || !(img ? ready : blocks.some(b => b.include));
+  const canDet = ready && !!img && !!ref;
+  $('#btnStart').disabled = starting || running || !(img ? canDet : blocks.some(b => b.include));
+  if ($('#btnAuto')) $('#btnAuto').disabled = !canDet || starting || running;
+  if ($('#btnGrow')) $('#btnGrow').disabled = !canDet || quad.length < 4 || starting || running;
   const b = bounds(), n = norths(); $('#cmd').classList.toggle('on', blocks.length > 0);
   const r = [b.xmin, b.xmax, b.ymin, b.ymax, b.zmin, b.zmax].join(' ');
   $('#cmd').textContent = 'cuda:  grass_solver.exe --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nmetal: ./grass_solver --formation formation.txt --north ' + (n.length === 4 ? 'all' : n[0] ?? 0) + ' ' + r + '\nNative solvers read the same raw formation.txt as browser mode.' + (n.length > 1 && n.length < 4 ? '\nRepeat with --north ' + n.slice(1).join(' and --north ') + ' for the other selected orientations.' : '');
-  $('#btnAddFace').disabled = quad.length < 4 || !ready || !img || starting;
+  $('#btnAddFace').disabled = quad.length < 4 || !canDet || starting;
 }
 document.querySelectorAll('.group input,.n').forEach(e => e.addEventListener('input', upd));
 $('#nAny').onchange = (e: any) => document.querySelectorAll('.n').forEach((c: any) => c.checked = e.target.checked);
@@ -253,8 +272,8 @@ function onQuadResult(m: any) {
   quad = []; refresh();
 }
 $('#btnAddFace').onclick = () => {
-  if (!img || quad.length < 4 || !worker) return;
-  const cv2 = document.createElement('canvas'); cv2.width = img.width; cv2.height = img.height; const x = cv2.getContext('2d')!; x.drawImage(img as any, 0, 0); const id = x.getImageData(0, 0, cv2.width, cv2.height);
+  if (!img || !ref || quad.length < 4 || !worker) return;
+  const buf = getPixelsBuffer();
   $('#btnAddFace').disabled = true;
   const prev = worker.onmessage!; worker.onmessage = e => {
     if (e.data.type === 'quadResult' || e.data.type === 'error') {
@@ -263,10 +282,11 @@ $('#btnAddFace').onclick = () => {
       onQuadResult(m);
     } else prev.call(worker, e);
   };
-  worker.postMessage({ type: 'classifyQuad', width: cv2.width, height: cv2.height, buffer: id.data.buffer, ref, opts: {backend: 'auto'}, quad: quad.map(p => p.slice()) }, [id.data.buffer]);
+  worker.postMessage({ type: 'classifyQuad', width: img.width, height: img.height, buffer: buf, ref, opts: {backend: 'auto'}, quad: quad.map(p => p.slice()) }, [buf]);
 };
 setMode('auto');
-texReady.then(startWorker).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();
+startWorker();
+texReady.then(() => { busyDet(false); upd(); }).catch(e => { setStatus('texture error','err'); log(e.message); }); upd();
 
 $('#btnCopyDetDebug').addEventListener('click',async()=>{
  const button=$('#btnCopyDetDebug');

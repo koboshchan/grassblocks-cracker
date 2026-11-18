@@ -40,7 +40,7 @@ export class BatchedGpuEcc {
    {binding:1,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:'float'}},
    ...[2,3,4,5,6,7].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===2?'read-only-storage' as const:'storage' as const}}))]});
   const pl=device.createPipelineLayout({bindGroupLayouts:[layout]});
-  const pipelines=[];for(const entryPoint of entries)pipelines.push(await device.createComputePipelineAsync({layout:pl,compute:{module:shader,entryPoint}}));
+  const pipelines=await Promise.all(entries.map(entryPoint=>device.createComputePipelineAsync({layout:pl,compute:{module:shader,entryPoint}})));
   let querySet:GPUQuerySet|undefined;let resolveBuffer:GPUBuffer|undefined;let queryReadbackBuffer:GPUBuffer|undefined;
   if(device.features?.has('timestamp-query')){
    querySet=device.createQuerySet({type:'timestamp',count:2});

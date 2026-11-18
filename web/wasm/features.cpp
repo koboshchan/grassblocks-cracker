@@ -4,6 +4,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <opencv2/calib3d.hpp>
@@ -200,6 +201,34 @@ unsigned char jsUint8(double value) {
     if (n < 0) n += 256;
     return static_cast<unsigned char>(n);
 }
+
+struct SiftMatchTuple {
+    double best;
+    double second;
+    int jbest;
+};
+
+struct SiftCache {
+    bool valid = false;
+    int w = 0;
+    int h = 0;
+    int s = 0;
+    std::array<double, 256> ref{};
+    std::uint64_t green_hash = 0;
+    SiftFeatures a{};
+    SiftFeatures b{};
+    std::vector<SiftMatchTuple> matches{};
+};
+
+std::uint64_t hashGreen(const std::vector<float>& green) {
+    std::uint64_t h = 14695981039346656037ull;
+    const auto* ptr = reinterpret_cast<const std::uint32_t*>(green.data());
+    for (std::size_t i = 0; i < green.size(); ++i) {
+        h ^= ptr[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
 } // namespace
 
 std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
@@ -207,41 +236,83 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
                            FeatureTimings* timings) {
     if (!std::isfinite(ratio))
         throw std::invalid_argument("Invalid SIFT ratio");
-    PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
+    if (w < 8 || h < 8 ||
+        static_cast<std::size_t>(w) * h > MaxInputPixels ||
+        green.size() != static_cast<std::size_t>(w) * h)
+        throw std::invalid_argument("Invalid SIFT grayscale dimensions or stride");
     constexpr int S = 256;
-    std::vector<float> texture(S * S);
-    for (int y = 0; y < S; ++y)
-        for (int x = 0; x < S; ++x)
-            texture[y * S + x] = static_cast<float>(ref[(y / 16) * 16 + x / 16]);
-    const auto a = features(texture, S, S);
-    const auto b = features(green, w, h);
-    extractionTimer.stop();
-    PhaseTimer matchingTimer(timings && b.count > 0 ? &timings->matchingHomography : nullptr);
-    std::vector<cv::Point2f> P, Q;
-    for (int i = 0; i < b.count; ++i) {
-        const int bi = i * FeatureStride + 2;
-        double best = std::numeric_limits<double>::infinity();
-        double second = best;
-        int jbest = 0;
-        for (int j = 0; j < a.count; ++j) {
-            const int aj = j * FeatureStride + 2;
-            double distance = 0;
-            for (int k = 0; k < 128; ++k) {
-                // JS converts both Float32 samples to double BEFORE subtracting.
-                const double v = static_cast<double>(b.data[bi + k]) -
-                                 static_cast<double>(a.data[aj + k]);
-                distance += v * v;
-                if (distance >= second) break;
+    const std::uint64_t green_hash = hashGreen(green);
+    static thread_local SiftCache cache;
+    const bool hit = cache.valid && cache.w == w && cache.h == h &&
+                     cache.s == S && cache.green_hash == green_hash &&
+                     cache.ref == ref;
+    if (!hit) {
+        PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
+        std::vector<float> texture(S * S);
+        for (int y = 0; y < S; ++y)
+            for (int x = 0; x < S; ++x)
+                texture[y * S + x] = static_cast<float>(ref[(y / 16) * 16 + x / 16]);
+        auto a = features(texture, S, S);
+        auto b = features(green, w, h);
+        extractionTimer.stop();
+        PhaseTimer matchingTimer(timings && b.count > 0 ? &timings->matchingHomography : nullptr);
+        std::vector<SiftMatchTuple> matches(b.count);
+        for (int i = 0; i < b.count; ++i) {
+            const int bi = i * FeatureStride + 2;
+            const float* bp = b.data.data() + bi;
+            double best = std::numeric_limits<double>::infinity();
+            double second = best;
+            int jbest = 0;
+            for (int j = 0; j < a.count; ++j) {
+                const int aj = j * FeatureStride + 2;
+                const float* ap = a.data.data() + aj;
+                double distance = 0;
+                for (int k = 0; k < 128; k += 8) {
+                    // JS converts both Float32 samples to double BEFORE subtracting.
+                    const double v0 = static_cast<double>(bp[k]) - static_cast<double>(ap[k]);
+                    const double v1 = static_cast<double>(bp[k + 1]) - static_cast<double>(ap[k + 1]);
+                    const double v2 = static_cast<double>(bp[k + 2]) - static_cast<double>(ap[k + 2]);
+                    const double v3 = static_cast<double>(bp[k + 3]) - static_cast<double>(ap[k + 3]);
+                    const double v4 = static_cast<double>(bp[k + 4]) - static_cast<double>(ap[k + 4]);
+                    const double v5 = static_cast<double>(bp[k + 5]) - static_cast<double>(ap[k + 5]);
+                    const double v6 = static_cast<double>(bp[k + 6]) - static_cast<double>(ap[k + 6]);
+                    const double v7 = static_cast<double>(bp[k + 7]) - static_cast<double>(ap[k + 7]);
+                    distance += v0 * v0;
+                    distance += v1 * v1;
+                    distance += v2 * v2;
+                    distance += v3 * v3;
+                    distance += v4 * v4;
+                    distance += v5 * v5;
+                    distance += v6 * v6;
+                    distance += v7 * v7;
+                    if (distance >= second) break;
+                }
+                if (distance < best) {
+                    second = best;
+                    best = distance;
+                    jbest = j;
+                } else if (distance < second) second = distance;
             }
-            if (distance < best) {
-                second = best;
-                best = distance;
-                jbest = j;
-            } else if (distance < second) second = distance;
+            matches[i] = {best, second, jbest};
         }
-        if (best < (ratio * ratio) * second) {
-            P.emplace_back(a.data[jbest * FeatureStride], a.data[jbest * FeatureStride + 1]);
-            Q.emplace_back(b.data[i * FeatureStride], b.data[i * FeatureStride + 1]);
+        cache.valid = true;
+        cache.w = w;
+        cache.h = h;
+        cache.s = S;
+        cache.ref = ref;
+        cache.green_hash = green_hash;
+        cache.a = std::move(a);
+        cache.b = std::move(b);
+        cache.matches = std::move(matches);
+    }
+    PhaseTimer matchingTimer(timings && cache.b.count > 0 ? &timings->matchingHomography : nullptr);
+    std::vector<cv::Point2f> P, Q;
+    const double ratio2 = ratio * ratio;
+    for (int i = 0; i < cache.b.count; ++i) {
+        const auto& m = cache.matches[i];
+        if (m.best < ratio2 * m.second) {
+            P.emplace_back(cache.a.data[m.jbest * FeatureStride], cache.a.data[m.jbest * FeatureStride + 1]);
+            Q.emplace_back(cache.b.data[i * FeatureStride], cache.b.data[i * FeatureStride + 1]);
         }
     }
     std::vector<Quad> found;
@@ -269,6 +340,16 @@ std::vector<Quad> binarySeeds(const std::vector<float>& green, int w, int h,
         img.data[i] = jsUint8(image.data[i]);
     cv::Mat refSmall(16, 16, CV_8UC1);
     for (int i = 0; i < 256; ++i) refSmall.data[i] = jsUint8(ref[i]);
+    auto akaze = cv::AKAZE::create();
+    auto orb = cv::ORB::create(6000);
+    orb->setScaleFactor(1.15);
+    orb->setNLevels(12);
+    orb->setEdgeThreshold(8);
+    orb->setFastThreshold(5);
+    std::vector<cv::KeyPoint> ksAkaze, ksOrb;
+    cv::Mat dsAkaze, dsOrb;
+    akaze->detectAndCompute(img, cv::noArray(), ksAkaze, dsAkaze);
+    orb->detectAndCompute(img, cv::noArray(), ksOrb, dsOrb);
     preparationTimer.stop();
     std::vector<Quad> found;
     for (int S : {64, 96, 128}) {
@@ -277,21 +358,14 @@ std::vector<Quad> binarySeeds(const std::vector<float>& green, int w, int h,
                 PhaseTimer extractionTimer(timings ? &timings->extraction : nullptr);
                 cv::Mat refBig;
                 cv::resize(refSmall, refBig, cv::Size(S, S), 0, 0, interp);
-                cv::Ptr<cv::Feature2D> detector;
-                if (feat == 0) {
-                    detector = cv::AKAZE::create();
-                } else {
-                    auto orb = cv::ORB::create(6000);
-                    orb->setScaleFactor(1.15);
-                    orb->setNLevels(12);
-                    orb->setEdgeThreshold(8);
-                    orb->setFastThreshold(5);
-                    detector = orb;
-                }
-                std::vector<cv::KeyPoint> kr, ks;
-                cv::Mat dr, ds;
+                cv::Ptr<cv::Feature2D> detector = (feat == 0)
+                    ? cv::Ptr<cv::Feature2D>(akaze)
+                    : cv::Ptr<cv::Feature2D>(orb);
+                const auto& ks = (feat == 0) ? ksAkaze : ksOrb;
+                const auto& ds = (feat == 0) ? dsAkaze : dsOrb;
+                std::vector<cv::KeyPoint> kr;
+                cv::Mat dr;
                 detector->detectAndCompute(refBig, cv::noArray(), kr, dr);
-                detector->detectAndCompute(img, cv::noArray(), ks, ds);
                 extractionTimer.stop();
                 PhaseTimer matchingTimer(timings && dr.rows >= 4 && ds.rows >= 4
                     ? &timings->matchingHomography : nullptr);

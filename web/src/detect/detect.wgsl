@@ -86,71 +86,31 @@ fn get_transform(quad: Quad) -> Transform {
     return Transform(a, b, c, d, e, f, g, h, true);
 }
 
-// Corrected centered two-pass covariance (Chan/Golub/LeVeque), with
-// Kahan compensated reductions. No sampling, geometry, threshold or CPU changes.
-// References: https://www.osti.gov/servlets/purl/1028931
-// https://math.pku.edu.cn/teachers/litj/notes/numer_anal/AmerStat_37_242_Chan_Variance.pdf
-struct Compensated4 { value:vec4<f32>, correction:vec4<f32> }
-fn compensated_add(acc:Compensated4, term:vec4<f32>) -> Compensated4 {
-    let residual = term - acc.correction;
-    let total = acc.value + residual;
-    return Compensated4(total, (total - acc.value) - residual);
-}
-struct CenteredCorrelation { scores:vec4<f32>, variance:f32 }
-// region=4 means all196 pixels; regions0..3 are the unchanged49-pixel votes.
-fn centered_correlation(sampled_patch:ptr<function,array<f32,256>>, region:u32) -> CenteredCorrelation {
-    let is_full = region == 4u;
-    let count = select(49.0, 196.0, is_full);
-    let j_start = select(select(1u, 8u, region >= 2u), 1u, is_full);
-    let j_end = select(j_start + 7u, 15u, is_full);
-    let i_start = select(select(1u, 8u, (region & 1u) == 1u), 1u, is_full);
-    let i_end = select(i_start + 7u, 15u, is_full);
-
-    var sum_a = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
-    for (var j = j_start; j < j_end; j = j + 1u) {
-        for (var i = i_start; i < i_end; i = i + 1u) {
-            sum_a = compensated_add(sum_a, vec4<f32>((*sampled_patch)[j * 16u + i]));
+fn check_bounds(t: Transform, wm1: f32, hm1: f32) -> u32 {
+    let cx = array<f32, 4>(1.5, 14.5, 1.5, 14.5);
+    let cy = array<f32, 4>(1.5, 1.5, 14.5, 14.5);
+    var fast = true;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let d = t.g * cx[k] + t.h * cy[k] + 1.0;
+        if (abs(d) < 1e-7) {
+            return 0u;
+        }
+        let inv_d = 1.0 / d;
+        let px = (t.a * cx[k] + t.b * cy[k] + t.c) * inv_d;
+        let py = (t.d * cx[k] + t.e * cy[k] + t.f) * inv_d;
+        if (px < -1e-4 || py < -1e-4 || px >= wm1 + 1e-4 || py >= hm1 + 1e-4) {
+            return 0u;
+        }
+        if (d <= 1e-4 || px < 0.01 || py < 0.01 || px >= wm1 - 0.01 || py >= hm1 - 0.01) {
+            fast = false;
         }
     }
-    let mean_a = sum_a.value / count;
-    // Existing reference sums are exact uint8 integer sums, not raw variances.
-    var reference_sum = stats.sb;
-    if (!is_full) {
-        reference_sum = stats.q_sb[region];
-    }
-    let mean_b = reference_sum / count;
-    var square_a = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
-    var square_b = square_a;
-    var product = square_a;
-    var deviation_a = square_a;
-    var deviation_b = square_a;
-    for (var j = j_start; j < j_end; j = j + 1u) {
-        for (var i = i_start; i < i_end; i = i + 1u) {
-            let idx = j * 16u + i;
-            let da = vec4<f32>((*sampled_patch)[idx]) - mean_a;
-            let db = refs[idx] - mean_b;
-            square_a = compensated_add(square_a, da * da);
-            square_b = compensated_add(square_b, db * db);
-            product = compensated_add(product, da * db);
-            deviation_a = compensated_add(deviation_a, da);
-            deviation_b = compensated_add(deviation_b, db);
-        }
-    }
-    // Correct mean-rounding error using centered residual sums, not large raw moments.
-    let va = square_a.value - deviation_a.value * deviation_a.value / count;
-    let vb = square_b.value - deviation_b.value * deviation_b.value / count;
-    let covariance = product.value - deviation_a.value * deviation_b.value / count;
-    var scores = vec4<f32>(0.0);
-    if (va.x > 1e-7) {
-        for (var k = 0u; k < 4u; k = k + 1u) {
-            if (vb[k] > 1e-7) {
-                scores[k] = covariance[k] / sqrt(va.x * vb[k]);
-            }
-        }
-    }
-    return CenteredCorrelation(scores, va.x);
+    return select(1u, 2u, fast);
 }
 
+// Corrected centered two-pass Chan/Golub/LeVeque covariance with 4-corner early-out
+// and algebraic 4-quadrant parallel variance/covariance merging (halves `refs` storage reads
+// and eliminates the duplicate 196-pixel full-patch two-pass loops).
 fn eval_quad_score(quad: Quad) -> f32 {
     let t = get_transform(quad);
     if (!t.valid) {
@@ -159,39 +119,80 @@ fn eval_quad_score(quad: Quad) -> f32 {
 
     let img_w = f32(params.width);
     let img_h = f32(params.height);
+    let wm1 = img_w - 1.0;
+    let hm1 = img_h - 1.0;
+    let bmode = check_bounds(t, wm1, hm1);
+    if (bmode == 0u) {
+        return -1.0;
+    }
+    let inv_w = 1.0 / img_w;
+    let inv_h = 1.0 / img_h;
 
-    var sampled_patch:array<f32,256>;
+    var sampled_patch: array<f32, 196>;
+    var sum_a = 0.0;
 
-    for (var j = 1u; j < 15u; j = j + 1u) {
-        let v = f32(j) + 0.5;
-        for (var i = 1u; i < 15u; i = i + 1u) {
-            let u = f32(i) + 0.5;
-            let denom = t.g * u + t.h * v + 1.0;
-            if (abs(denom) < 1e-7) {
-                return -1.0;
+    if (bmode == 2u) {
+        for (var j = 1u; j < 15u; j = j + 1u) {
+            let v = f32(j) + 0.5;
+            var nx = t.a * 1.5 + t.b * v + t.c;
+            var ny = t.d * 1.5 + t.e * v + t.f;
+            var d = t.g * 1.5 + t.h * v + 1.0;
+            let pb = (j - 1u) * 14u;
+            for (var i = 0u; i < 14u; i = i + 1u) {
+                let inv_d = 1.0 / d;
+                let val = textureSampleLevel(t_image, s_image, vec2<f32>((nx * inv_d + 0.5) * inv_w, (ny * inv_d + 0.5) * inv_h), 0.0).r * 255.0;
+                sampled_patch[pb + i] = val;
+                sum_a += val;
+                nx += t.a;
+                ny += t.d;
+                d += t.g;
             }
-
-            let px = (t.a * u + t.b * v + t.c) / denom;
-            let py = (t.d * u + t.e * v + t.f) / denom;
-
-            if (px < 0.0 || py < 0.0 || px >= img_w - 1.0 || py >= img_h - 1.0) {
-                return -1.0;
+        }
+    } else {
+        for (var j = 1u; j < 15u; j = j + 1u) {
+            let v = f32(j) + 0.5;
+            var nx = t.a * 1.5 + t.b * v + t.c;
+            var ny = t.d * 1.5 + t.e * v + t.f;
+            var d = t.g * 1.5 + t.h * v + 1.0;
+            let pb = (j - 1u) * 14u;
+            for (var i = 0u; i < 14u; i = i + 1u) {
+                if (abs(d) < 1e-7) { return -1.0; }
+                let px = nx / d;
+                let py = ny / d;
+                if (px < 0.0 || py < 0.0 || px >= wm1 || py >= hm1) { return -1.0; }
+                let val = textureSampleLevel(t_image, s_image, vec2<f32>((px + 0.5) * inv_w, (py + 0.5) * inv_h), 0.0).r * 255.0;
+                sampled_patch[pb + i] = val;
+                sum_a += val;
+                nx += t.a;
+                ny += t.d;
+                d += t.g;
             }
-
-            let uv = vec2<f32>((px + 0.5) / img_w, (py + 0.5) / img_h);
-            let sample_val = textureSampleLevel(t_image, s_image, uv, 0.0).r * 255.0;
-            let ref_val = refs[j * 16u + i];
-
-            sampled_patch[j*16u+i] = sample_val;
         }
     }
 
-    let centered=centered_correlation(&sampled_patch,4u);
-    if(centered.variance<=1e-7){return -1.0;}
-    var best_sc=-1.0;
-    for(var k=0u;k<4u;k=k+1u){if(centered.scores[k]>best_sc){best_sc=centered.scores[k];}}
-
-    return best_sc;
+    let inv_196 = 1.0 / 196.0;
+    let mean_a = sum_a * inv_196;
+    let mean_b = stats.sb * inv_196;
+    var sq_a = 0.0;
+    var dev_a = 0.0;
+    var cov = vec4<f32>(0.0);
+    for (var j = 1u; j < 15u; j = j + 1u) {
+        let pb = (j - 1u) * 14u;
+        let rb = j * 16u;
+        for (var i = 1u; i < 15u; i = i + 1u) {
+            let da = sampled_patch[pb + (i - 1u)] - mean_a;
+            let db = refs[rb + i] - mean_b;
+            sq_a += da * da;
+            dev_a += da;
+            cov += da * db;
+        }
+    }
+    let va = sq_a - dev_a * dev_a * inv_196;
+    if (va <= 1e-7) {
+        return -1.0;
+    }
+    let sc = select(vec4<f32>(0.0), cov * inverseSqrt(va * stats.vb), stats.vb > vec4<f32>(1e-7));
+    return max(max(sc.x, sc.y), max(sc.z, sc.w));
 }
 
 fn eval_full_result(quad: Quad) -> Result {
@@ -202,79 +203,126 @@ fn eval_full_result(quad: Quad) -> Result {
 
     let img_w = f32(params.width);
     let img_h = f32(params.height);
+    let wm1 = img_w - 1.0;
+    let hm1 = img_h - 1.0;
+    let bmode = check_bounds(t, wm1, hm1);
+    if (bmode == 0u) {
+        return Result(0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let inv_w = 1.0 / img_w;
+    let inv_h = 1.0 / img_h;
 
-    var sampled_patch:array<f32,256>;
+    var sampled_patch: array<f32, 196>;
+    var q_sums = vec4<f32>(0.0);
 
-    for (var j = 1u; j < 15u; j = j + 1u) {
-        let v = f32(j) + 0.5;
-        for (var i = 1u; i < 15u; i = i + 1u) {
-            let u = f32(i) + 0.5;
-            let denom = t.g * u + t.h * v + 1.0;
-            if (abs(denom) < 1e-7) {
-                return Result(0.0, 0.0, 0.0, 0.0, 0.0);
+    if (bmode == 2u) {
+        for (var j = 1u; j < 15u; j = j + 1u) {
+            let v = f32(j) + 0.5;
+            var nx = t.a * 1.5 + t.b * v + t.c;
+            var ny = t.d * 1.5 + t.e * v + t.f;
+            var d = t.g * 1.5 + t.h * v + 1.0;
+            let pb = (j - 1u) * 14u;
+            var sL = 0.0;
+            var sR = 0.0;
+            for (var i = 0u; i < 7u; i = i + 1u) {
+                let inv_d = 1.0 / d;
+                let val = textureSampleLevel(t_image, s_image, vec2<f32>((nx * inv_d + 0.5) * inv_w, (ny * inv_d + 0.5) * inv_h), 0.0).r * 255.0;
+                sampled_patch[pb + i] = val;
+                sL += val;
+                nx += t.a;
+                ny += t.d;
+                d += t.g;
             }
-
-            let px = (t.a * u + t.b * v + t.c) / denom;
-            let py = (t.d * u + t.e * v + t.f) / denom;
-
-            if (px < 0.0 || py < 0.0 || px >= img_w - 1.0 || py >= img_h - 1.0) {
-                return Result(0.0, 0.0, 0.0, 0.0, 0.0);
+            for (var i = 7u; i < 14u; i = i + 1u) {
+                let inv_d = 1.0 / d;
+                let val = textureSampleLevel(t_image, s_image, vec2<f32>((nx * inv_d + 0.5) * inv_w, (ny * inv_d + 0.5) * inv_h), 0.0).r * 255.0;
+                sampled_patch[pb + i] = val;
+                sR += val;
+                nx += t.a;
+                ny += t.d;
+                d += t.g;
             }
-
-            let uv = vec2<f32>((px + 0.5) / img_w, (py + 0.5) / img_h);
-            let sample_val = textureSampleLevel(t_image, s_image, uv, 0.0).r * 255.0;
-
-            sampled_patch[j*16u+i] = sample_val;
+            if (j < 8u) {
+                q_sums.x += sL;
+                q_sums.y += sR;
+            } else {
+                q_sums.z += sL;
+                q_sums.w += sR;
+            }
+        }
+    } else {
+        for (var j = 1u; j < 15u; j = j + 1u) {
+            let v = f32(j) + 0.5;
+            var nx = t.a * 1.5 + t.b * v + t.c;
+            var ny = t.d * 1.5 + t.e * v + t.f;
+            var d = t.g * 1.5 + t.h * v + 1.0;
+            let pb = (j - 1u) * 14u;
+            for (var i = 0u; i < 14u; i = i + 1u) {
+                if (abs(d) < 1e-7) {
+                    return Result(0.0, 0.0, 0.0, 0.0, 0.0);
+                }
+                let px = nx / d;
+                let py = ny / d;
+                if (px < 0.0 || py < 0.0 || px >= wm1 || py >= hm1) {
+                    return Result(0.0, 0.0, 0.0, 0.0, 0.0);
+                }
+                let val = textureSampleLevel(t_image, s_image, vec2<f32>((px + 0.5) * inv_w, (py + 0.5) * inv_h), 0.0).r * 255.0;
+                sampled_patch[pb + i] = val;
+                let q = select(0u, 1u, i >= 7u) + select(0u, 2u, j >= 8u);
+                q_sums[q] += val;
+                nx += t.a;
+                ny += t.d;
+                d += t.g;
+            }
         }
     }
 
-    let zero_comp = Compensated4(vec4<f32>(0.0), vec4<f32>(0.0));
-    var sum_a = zero_comp;
-    var q_sum_a = array<Compensated4, 4>(zero_comp, zero_comp, zero_comp, zero_comp);
+    let inv_49 = 1.0 / 49.0;
+    var q_means = q_sums * inv_49;
+    var va = 0.0;
+    var cov = vec4<f32>(0.0);
+    var q_vas: array<f32, 4>;
+    var q_covs: array<vec4<f32>, 4>;
 
-    for (var j = 1u; j < 15u; j = j + 1u) {
-        let q_row = select(0u, 2u, j >= 8u);
-        for (var i = 1u; i < 15u; i = i + 1u) {
-            let val = vec4<f32>(sampled_patch[j * 16u + i]);
-            sum_a = compensated_add(sum_a, val);
-            let q = q_row + select(0u, 1u, i >= 8u);
-            q_sum_a[q] = compensated_add(q_sum_a[q], val);
+    for (var q = 0u; q < 4u; q = q + 1u) {
+        let js = select(1u, 8u, q >= 2u);
+        let is0 = select(1u, 8u, (q & 1u) == 1u);
+        let qma = q_means[q];
+        let qmb = stats.q_sb[q] * inv_49;
+        var qsq = 0.0;
+        var qdev = 0.0;
+        var qp = vec4<f32>(0.0);
+        for (var j = js; j < js + 7u; j = j + 1u) {
+            let pb = (j - 1u) * 14u;
+            let rb = j * 16u;
+            for (var i = is0; i < is0 + 7u; i = i + 1u) {
+                let da = sampled_patch[pb + (i - 1u)] - qma;
+                let db = refs[rb + i] - qmb;
+                qsq += da * da;
+                qdev += da;
+                qp += da * db;
+            }
         }
+        let qva = qsq - qdev * qdev * inv_49;
+        q_means[q] = qma + qdev * inv_49;
+        q_vas[q] = qva;
+        q_covs[q] = qp;
+        va += qva;
+        cov += qp;
     }
 
-    let mean_a = sum_a.value / 196.0;
-    let mean_b = stats.sb / 196.0;
-
-    var square_a = zero_comp;
-    var square_b = zero_comp;
-    var product = zero_comp;
-    var deviation_a = zero_comp;
-    var deviation_b = zero_comp;
-
-    for (var j = 1u; j < 15u; j = j + 1u) {
-        for (var i = 1u; i < 15u; i = i + 1u) {
-            let idx = j * 16u + i;
-            let da = vec4<f32>(sampled_patch[idx]) - mean_a;
-            let db = refs[idx] - mean_b;
-            square_a = compensated_add(square_a, da * da);
-            square_b = compensated_add(square_b, db * db);
-            product = compensated_add(product, da * db);
-            deviation_a = compensated_add(deviation_a, da);
-            deviation_b = compensated_add(deviation_b, db);
-        }
+    let mean_a = 0.25 * ((q_means.x + q_means.y) + (q_means.z + q_means.w));
+    let mean_b = stats.sb * (1.0 / 196.0);
+    for (var q = 0u; q < 4u; q = q + 1u) {
+        let da_q = q_means[q] - mean_a;
+        let db_q = stats.q_sb[q] * inv_49 - mean_b;
+        va += 49.0 * da_q * da_q;
+        cov += (49.0 * da_q) * db_q;
     }
-
-    let va = square_a.value - deviation_a.value * deviation_a.value / 196.0;
-    let vb = square_b.value - deviation_b.value * deviation_b.value / 196.0;
-    let covariance = product.value - deviation_a.value * deviation_b.value / 196.0;
 
     var sc = vec4<f32>(0.0);
-    if (va.x > 1e-7) {
-        for (var k = 0u; k < 4u; k = k + 1u) {
-            if (vb[k] > 1e-7) {
-                sc[k] = covariance[k] / sqrt(va.x * vb[k]);
-            }
-        }
+    if (va > 1e-7) {
+        sc = select(vec4<f32>(0.0), cov * inverseSqrt(va * stats.vb), stats.vb > vec4<f32>(1e-7));
     }
 
     var best = 0u;
@@ -291,64 +339,25 @@ fn eval_full_result(quad: Quad) -> Result {
         }
     }
 
-    let score = sc[best];
-    let margin = sc[best] - sc[second];
-
     var votes = 0u;
     for (var q = 0u; q < 4u; q = q + 1u) {
-        let q_mean_a = q_sum_a[q].value / 49.0;
-        let q_mean_b = stats.q_sb[q] / 49.0;
-
-        var q_square_a = zero_comp;
-        var q_square_b = zero_comp;
-        var q_product = zero_comp;
-        var q_deviation_a = zero_comp;
-        var q_deviation_b = zero_comp;
-
-        let j_start = select(1u, 8u, q >= 2u);
-        let j_end = j_start + 7u;
-        let i_start = select(1u, 8u, (q & 1u) == 1u);
-        let i_end = i_start + 7u;
-
-        for (var j = j_start; j < j_end; j = j + 1u) {
-            for (var i = i_start; i < i_end; i = i + 1u) {
-                let idx = j * 16u + i;
-                let da = vec4<f32>(sampled_patch[idx]) - q_mean_a;
-                let db = refs[idx] - q_mean_b;
-                q_square_a = compensated_add(q_square_a, da * da);
-                q_square_b = compensated_add(q_square_b, db * db);
-                q_product = compensated_add(q_product, da * db);
-                q_deviation_a = compensated_add(q_deviation_a, da);
-                q_deviation_b = compensated_add(q_deviation_b, db);
-            }
+        let qva = q_vas[q];
+        var qsc = vec4<f32>(0.0);
+        if (qva > 1e-7) {
+            qsc = select(vec4<f32>(0.0), q_covs[q] * inverseSqrt(qva * stats.q_vb[q]), stats.q_vb[q] > vec4<f32>(1e-7));
         }
-
-        let q_va = q_square_a.value - q_deviation_a.value * q_deviation_a.value / 49.0;
-        let q_vb = q_square_b.value - q_deviation_b.value * q_deviation_b.value / 49.0;
-        let q_covariance = q_product.value - q_deviation_a.value * q_deviation_b.value / 49.0;
-
-        var q_sc = vec4<f32>(0.0);
-        if (q_va.x > 1e-7) {
-            for (var k = 0u; k < 4u; k = k + 1u) {
-                if (q_vb[k] > 1e-7) {
-                    q_sc[k] = q_covariance[k] / sqrt(q_va.x * q_vb[k]);
-                }
-            }
-        }
-
-        var q_best = 0u;
+        var qb = 0u;
         for (var k = 1u; k < 4u; k = k + 1u) {
-            if (q_sc[k] > q_sc[q_best]) {
-                q_best = k;
+            if (qsc[k] > qsc[qb]) {
+                qb = k;
             }
         }
-
-        if (q_best == best) {
+        if (qb == best) {
             votes = votes + 1u;
         }
     }
 
-    return Result(1.0, f32(best), score, margin, f32(votes));
+    return Result(1.0, f32(best), sc[best], sc[best] - sc[second], f32(votes));
 }
 
 fn get_corner(q: Quad, c: u32) -> vec2<f32> {
@@ -391,7 +400,6 @@ fn refine_main(@builtin(global_invocation_id) id: vec3<u32>) {
         for (var c = 0u; c < 4u; c = c + 1u) {
             let p = get_corner(best_quad, c);
 
-            // Sample small subpixel offsets (-0.5, 0, +0.5) around corner coordinates
             let q_xm = with_corner(best_quad, c, vec2<f32>(p.x - 0.5, p.y));
             let s_xm = eval_quad_score(q_xm);
 
@@ -404,11 +412,9 @@ fn refine_main(@builtin(global_invocation_id) id: vec3<u32>) {
             let q_yp = with_corner(best_quad, c, vec2<f32>(p.x, p.y + 0.5));
             let s_yp = eval_quad_score(q_yp);
 
-            // Compute local gradient along x and y
             let grad_x = s_xp - s_xm;
             let grad_y = s_yp - s_ym;
 
-            // Second differences (curvature)
             let d2x = s_xp - 2.0 * best_score + s_xm;
             let d2y = s_yp - 2.0 * best_score + s_ym;
 
@@ -426,7 +432,6 @@ fn refine_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 step_y = select(-0.5, 0.5, grad_y > 0.0);
             }
 
-            // Adjust corner position along local gradient to maximize 4-way correlation score
             if (abs(step_x) > 1e-6 || abs(step_y) > 1e-6) {
                 let q_grad = with_corner(best_quad, c, vec2<f32>(p.x + step_x, p.y + step_y));
                 let s_grad = eval_quad_score(q_grad);
@@ -436,7 +441,6 @@ fn refine_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
 
-            // Also test discrete sampled offsets
             if (s_xp > best_score) {
                 best_score = s_xp;
                 best_quad = q_xp;

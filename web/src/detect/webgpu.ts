@@ -15,6 +15,7 @@ export class WebGpuDetector {
   private sampler: GPUSampler | null = null;
   private imageWidth = 0;
   private imageHeight = 0;
+  private lastImageData: Uint8Array | null = null;
 
   private paramsBuffer: GPUBuffer;
   private refStatsBuffer: GPUBuffer | null = null;
@@ -22,6 +23,15 @@ export class WebGpuDetector {
   private paramsData = new Uint32Array(4);
   private refStatsData: Float32Array | null = null;
   private refPatternData: Float32Array | null = null;
+
+  private quadsBuffer: GPUBuffer | null = null;
+  private quadsBufferCapacity = 0;
+  private resultsBuffer: GPUBuffer | null = null;
+  private readBuffer: GPUBuffer | null = null;
+  private resultsBufferCapacity = 0;
+  private classifyPoolBusy = false;
+  private cachedBindGroup: GPUBuffer | GPUBindGroup | null = null;
+  private bindGroupImageView: GPUTextureView | null = null;
 
   private destroyed = false;
 
@@ -150,6 +160,9 @@ export class WebGpuDetector {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2) {
       throw new Error(`Invalid image dimensions: ${width}x${height}`);
     }
+    if (this.imageTexture && this.imageWidth === width && this.imageHeight === height && this.lastImageData === rgba) {
+      return;
+    }
 
     if (this.imageTexture) {
       this.imageTexture.destroy();
@@ -159,6 +172,7 @@ export class WebGpuDetector {
 
     this.imageWidth = width;
     this.imageHeight = height;
+    this.lastImageData = rgba;
 
     this.imageTexture = this.device.createTexture({
       size: [width, height, 1],
@@ -335,36 +349,89 @@ export class WebGpuDetector {
     this.device.queue.writeBuffer(this.paramsBuffer, 0, this.paramsData);
 
     const quadsByteLength = Math.max(32, quads.byteLength);
-    const quadsBuffer = this.device.createBuffer({
-      size: quadsByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    this.device.queue.writeBuffer(quadsBuffer, 0, quads);
+    const resultsByteLength = Math.max(20, count * 20);
+    const usePool = !this.classifyPoolBusy;
+    if (usePool) {
+      this.classifyPoolBusy = true;
+    }
 
-    const resultByteLength = Math.max(20, count * 20);
-    const resultsBuffer = this.device.createBuffer({
-      size: resultByteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
-    const readBuffer = this.device.createBuffer({
-      size: resultByteLength,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-    });
-
+    let quadsBuffer: GPUBuffer | null = null;
+    let resultsBuffer: GPUBuffer | null = null;
+    let readBuffer: GPUBuffer | null = null;
     let mapped = false;
     try {
-      const bindGroup = this.device.createBindGroup({
-        layout: this.pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: this.paramsBuffer } },
-          { binding: 1, resource: { buffer: this.refStatsBuffer } },
-          { binding: 2, resource: { buffer: quadsBuffer } },
-          { binding: 3, resource: { buffer: resultsBuffer } },
-          { binding: 4, resource: this.imageView },
-          { binding: 5, resource: this.sampler },
-          { binding: 6, resource: { buffer: this.refsBuffer } },
-        ],
-      });
+      let bindGroup: GPUBindGroup;
+      if (usePool) {
+        if (!this.quadsBuffer || this.quadsBufferCapacity < quadsByteLength) {
+          this.quadsBuffer?.destroy();
+          this.quadsBuffer = this.device.createBuffer({
+            size: quadsByteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          this.quadsBufferCapacity = quadsByteLength;
+          this.cachedBindGroup = null;
+        }
+        if (!this.resultsBuffer || !this.readBuffer || this.resultsBufferCapacity < resultsByteLength) {
+          this.resultsBuffer?.destroy();
+          this.readBuffer?.destroy();
+          this.resultsBuffer = this.device.createBuffer({
+            size: resultsByteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+          });
+          this.readBuffer = this.device.createBuffer({
+            size: resultsByteLength,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+          });
+          this.resultsBufferCapacity = resultsByteLength;
+          this.cachedBindGroup = null;
+        }
+        quadsBuffer = this.quadsBuffer;
+        resultsBuffer = this.resultsBuffer;
+        readBuffer = this.readBuffer;
+        if (!this.cachedBindGroup || this.bindGroupImageView !== this.imageView) {
+          this.cachedBindGroup = this.device.createBindGroup({
+            layout: this.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: this.paramsBuffer } },
+              { binding: 1, resource: { buffer: this.refStatsBuffer } },
+              { binding: 2, resource: { buffer: quadsBuffer } },
+              { binding: 3, resource: { buffer: resultsBuffer } },
+              { binding: 4, resource: this.imageView },
+              { binding: 5, resource: this.sampler },
+              { binding: 6, resource: { buffer: this.refsBuffer } },
+            ],
+          });
+          this.bindGroupImageView = this.imageView;
+        }
+        bindGroup = this.cachedBindGroup as GPUBindGroup;
+      } else {
+        quadsBuffer = this.device.createBuffer({
+          size: quadsByteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        resultsBuffer = this.device.createBuffer({
+          size: resultsByteLength,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        });
+        readBuffer = this.device.createBuffer({
+          size: resultsByteLength,
+          usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+        bindGroup = this.device.createBindGroup({
+          layout: this.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: this.paramsBuffer } },
+            { binding: 1, resource: { buffer: this.refStatsBuffer } },
+            { binding: 2, resource: { buffer: quadsBuffer } },
+            { binding: 3, resource: { buffer: resultsBuffer } },
+            { binding: 4, resource: this.imageView },
+            { binding: 5, resource: this.sampler },
+            { binding: 6, resource: { buffer: this.refsBuffer } },
+          ],
+        });
+      }
+
+      this.device.queue.writeBuffer(quadsBuffer, 0, quads);
 
       const commandEncoder = this.device.createCommandEncoder();
       const pass = commandEncoder.beginComputePass();
@@ -380,16 +447,21 @@ export class WebGpuDetector {
       await readBuffer.mapAsync(GPUMapMode.READ);
       mapped = true;
 
-      const out = new Float32Array(readBuffer.getMappedRange(0, count * 20).slice(0));
+      const out = new Float32Array(count * 5);
+      out.set(new Float32Array(readBuffer.getMappedRange(0, count * 20)));
       return out;
     } finally {
-      if (mapped) {
+      if (mapped && readBuffer) {
         readBuffer.unmap();
       }
       this.diagnostics.classifyMs+=performance.now()-classifiedAt;
-      quadsBuffer.destroy();
-      resultsBuffer.destroy();
-      readBuffer.destroy();
+      if (usePool) {
+        this.classifyPoolBusy = false;
+      } else {
+        quadsBuffer?.destroy();
+        resultsBuffer?.destroy();
+        readBuffer?.destroy();
+      }
     }
   }
 
@@ -472,15 +544,27 @@ export class WebGpuDetector {
     this.paramsBuffer?.destroy();
     this.refStatsBuffer?.destroy();
     this.refsBuffer?.destroy();
+    this.quadsBuffer?.destroy();
+    this.resultsBuffer?.destroy();
+    this.readBuffer?.destroy();
     this.imageTexture?.destroy();
     this.device?.destroy();
 
     this.refStatsBuffer = null;
     this.refsBuffer = null;
+    this.quadsBuffer = null;
+    this.quadsBufferCapacity = 0;
+    this.resultsBuffer = null;
+    this.readBuffer = null;
+    this.resultsBufferCapacity = 0;
+    this.classifyPoolBusy = false;
+    this.cachedBindGroup = null;
+    this.bindGroupImageView = null;
     this.refStatsData = null;
     this.refPatternData = null;
     this.imageTexture = null;
     this.imageView = null;
+    this.lastImageData = null;
     this.sampler = null;
   }
 }

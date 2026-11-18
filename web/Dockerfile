@@ -16,7 +16,7 @@ RUN sh wasm/build-pipeline.sh link
 
 FROM wasm-toolchain AS wasm-cpu-cracker
 COPY web/solver.c .
-RUN mkdir /out && clang --target=wasm32 -O3 -msimd128 -fwrapv -fno-builtin -nostdlib -Wl,--no-entry -Wl,--export-all -Wl,--initial-memory=262144 -o /out/solver.wasm solver.c
+RUN mkdir /out && clang --target=wasm32 -O3 -msimd128 -fwrapv -fno-builtin -nostdlib -Wl,--no-entry -Wl,--export-all -Wl,--initial-memory=262144 -flto -Wl,--strip-all -o /out/solver.wasm solver.c
 
 FROM rust:1.91-slim-bookworm AS shader-validator
 RUN cargo install naga-cli --version 30.0.1 --locked --root /opt/naga

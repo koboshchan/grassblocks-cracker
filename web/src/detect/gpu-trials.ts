@@ -12,8 +12,9 @@ export const GPU_TRIALS = [
 ] as const;
 export function mergeGpuAligned(a:Block[], incoming:Block[]):Block[]{
  const votes=new Map<string,{offset:number[],count:number}>();let evidence=0;
+ const scales=a.map(o=>Math.min(...o.quad.map((p,k)=>Math.hypot(p[0]-o.quad[(k+1)&3][0],p[1]-o.quad[(k+1)&3][1]))));
  for(const b of incoming){let nearest:Block|undefined;let best=Infinity;
-  for(const o of a){const scale=Math.min(...o.quad.map((p,i)=>Math.hypot(p[0]-o.quad[(i+1)%4][0],p[1]-o.quad[(i+1)%4][1])));const error=b.quad.reduce((s,p,i)=>s+Math.hypot(p[0]-o.quad[i][0],p[1]-o.quad[i][1]),0)/4;if(error<Math.max(3,scale*.12)&&error<best){nearest=o;best=error;}}
+  for(let j=0;j<a.length;j++){const o=a[j],scale=scales[j];const error=b.quad.reduce((s,p,i)=>s+Math.hypot(p[0]-o.quad[i][0],p[1]-o.quad[i][1]),0)/4;if(error<Math.max(3,scale*.12)&&error<best){nearest=o;best=error;}}
   if(!nearest)continue;if(nearest.rotation!==b.rotation)return a;
   const offset=[nearest.x-b.x,nearest.y-b.y,nearest.z-b.z];const key=offset.join(',');const v=votes.get(key);if(v)v.count++;else votes.set(key,{offset,count:1});evidence++;
  }

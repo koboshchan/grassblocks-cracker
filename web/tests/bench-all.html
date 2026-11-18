@@ -1,0 +1,355 @@
+<!doctype html><meta charset="utf-8"><title>Running</title><pre id="out">Running</pre><script type="module">
+import {createSolver} from '../solver.js';
+import {rotationBigInt} from '../hash.js';
+import {WebGpuDetector} from './webgpu-bundle.js';
+import {eccShader} from './ecc-shader.js';
+
+const out = document.querySelector('#out');
+const results = {};
+
+function quadBase(q) {
+  const [a, b, c, d] = q;
+  const dx1 = b[0] - c[0], dx2 = d[0] - c[0], dx3 = a[0] - b[0] + c[0] - d[0];
+  const dy1 = b[1] - c[1], dy2 = d[1] - c[1], dy3 = a[1] - b[1] + c[1] - d[1];
+  const det = dx1 * dy2 - dx2 * dy1;
+  const g = (dx3 * dy2 - dx2 * dy3) / det / 128, h = (dx1 * dy3 - dx3 * dy1) / det / 128;
+  return [(b[0] - a[0]) / 128 + g * b[0], (d[0] - a[0]) / 128 + h * d[0], a[0], (b[1] - a[1]) / 128 + g * b[1], (d[1] - a[1]) / 128 + h * d[1], a[1], g, h, 1];
+}
+
+try {
+  // 1. Load hill22 fixture & verify oracle
+  const text = await (await fetch('./fixtures/hill22.txt')).text();
+  const ls = text.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+  const blocks = ls.slice(1).map(l => {
+    const [x, y, z, rotation, is_side] = l.split(/\s+/).map(Number);
+    return {x, y, z, rotation, is_side};
+  });
+  for (const b of blocks) {
+    if (rotationBigInt(3538 + b.x, 90 + b.y, -454 + b.z, b.is_side) !== b.rotation) {
+      throw Error('Hill fixture mismatch');
+    }
+  }
+
+  // 2. Benchmark WebGPU Solver (kernel.wgsl)
+  const gpuSolver = await createSolver({backend: 'gpu'});
+  results.adapter = gpuSolver.adapterInfo;
+  const smallGpu = await gpuSolver.search(blocks, {xmin: 3500, xmax: 3580, zmin: -490, zmax: -420, ymin: 70, ymax: 110, north: [0, 1, 2, 3]});
+  if (!smallGpu.matches.some(m => m.x === 3538 && m.y === 90 && m.z === -454 && m.north === 0)) {
+    throw Error('WebGPU solver hill candidate missing');
+  }
+  const speed1North = await gpuSolver.search(blocks, {xmin: -1000, xmax: 1000, zmin: -1000, zmax: 1000, ymin: -64, ymax: 319, north: [0]});
+  const speed4North = await gpuSolver.search(blocks, {xmin: -500, xmax: 500, zmin: -500, zmax: 500, ymin: -64, ymax: 319, north: [0, 1, 2, 3]});
+  results.webgpuSolver = {
+    smallMatches: smallGpu.matches,
+    singleNorth: {
+      total: speed1North.total,
+      seconds: Number(speed1North.seconds.toFixed(4)),
+      billionPerSec: Number((speed1North.rate / 1e9).toFixed(3)),
+    },
+    fourNorth: {
+      total: speed4North.total,
+      seconds: Number(speed4North.seconds.toFixed(4)),
+      billionPerSec: Number((speed4North.rate / 1e9).toFixed(3)),
+    },
+  };
+  gpuSolver.destroy?.();
+
+  // 3. Benchmark WASM SIMD Solver (solver.c / solver.wasm)
+  const wasmBytes = await (await fetch('../solver.wasm')).arrayBuffer();
+  const {instance: solverWasm} = await WebAssembly.instantiate(wasmBytes, {});
+  const sw = solverWasm.exports;
+  const bView = new Int32Array(sw.memory.buffer, sw.blocks_ptr(), blocks.length * 5);
+  blocks.forEach((b, i) => bView.set([b.x, b.y, b.z, b.rotation, b.is_side], i * 5));
+  // Verify exact match at (3538, 90, -454)
+  const hitCount = sw.scan(3500, 90, -454, 100, 22);
+  const rView = new Int32Array(sw.memory.buffer, sw.results_ptr(), hitCount);
+  if (hitCount !== 1 || rView[0] !== 3538) {
+    throw Error('WASM SIMD solver hill match failed: ' + hitCount);
+  }
+  // Benchmark 10,000,000 candidates in WASM SIMD scan
+  const simdCount = 10000;
+  const simdRows = 1000;
+  const tSimd0 = performance.now();
+  let totalMatches = 0;
+  for (let r = 0; r < simdRows; r++) {
+    totalMatches += sw.scan(-5000, 90, -500 + r, simdCount, 22);
+  }
+  const simdSec = (performance.now() - tSimd0) / 1000;
+  const simdTotal = simdCount * simdRows;
+  results.wasmSimdSolver = {
+    verifiedMatch: 3538,
+    candidatesTested: simdTotal,
+    seconds: Number(simdSec.toFixed(4)),
+    millionPerSecPerCore: Number((simdTotal / simdSec / 1e6).toFixed(2)),
+    matches: totalMatches,
+  };
+
+  // 4. Benchmark WASM SIMD Dense Classifier (detect-wasm.c / detect-wasm.wasm)
+  const detFixture = await (await fetch('./fixtures/detection.json')).json();
+  const hillGrayBuf = await (await fetch('./fixtures/hill-gray.bin')).arrayBuffer();
+  const hillGray = new Uint8Array(hillGrayBuf);
+  const detWasmBytes = await (await fetch('../detect-wasm.wasm')).arrayBuffer();
+  const {instance: detWasm} = await WebAssembly.instantiate(detWasmBytes, {});
+  const dw = detWasm.exports;
+  const P = detFixture.camera.P.flat();
+  const camQuads = [];
+  for (let y = -5; y <= 5; y++) {
+    for (let z = -15; z < 9; z++) {
+      for (let x = -12; x < 16; x++) {
+        const q = [[0,0],[1,0],[1,1],[0,1]].map(([a,b]) => {
+          const X = x + a, Z = z + b, w = P[8]*X + P[9]*y + P[10]*Z + P[11];
+          return [(P[0]*X + P[1]*y + P[2]*Z + P[3])/w, (P[4]*X + P[5]*y + P[6]*Z + P[7])/w];
+        }).flat();
+        if (q.every(Number.isFinite)) camQuads.push(q);
+      }
+    }
+  }
+  for (const b of detFixture.camera.blocks) camQuads.push(b.quad.flat());
+  const flatQuads = new Float32Array(camQuads.flat());
+  const base = Number(dw.__heap_base.value);
+  const gPtr = base + 1024;
+  const qPtr = (gPtr + hillGray.length + 7) & ~7;
+  const outPtr = qPtr + flatQuads.byteLength;
+  const needBytes = outPtr + camQuads.length * 5 * 4;
+  if (needBytes > dw.memory.buffer.byteLength) {
+    dw.memory.grow(Math.ceil((needBytes - dw.memory.buffer.byteLength) / 65536));
+  }
+  new Uint8Array(dw.memory.buffer, gPtr, hillGray.length).set(hillGray);
+  const refs4 = [];
+  for (let k = 0; k < 4; k++) {
+    for (let y = 0; y < 16; y++) {
+      for (let x = 0; x < 16; x++) {
+        let xx = x, yy = y;
+        for (let j = 0; j < k; j++) { const t = xx; xx = yy; yy = 15 - t; }
+        refs4.push(detFixture.ref[yy][xx]);
+      }
+    }
+  }
+  new Uint8Array(dw.memory.buffer, base, 1024).set(refs4);
+  dw.set_refs(base);
+  new Float32Array(dw.memory.buffer, qPtr, flatQuads.length).set(flatQuads);
+  // Warmup
+  dw.classify_batch(gPtr, detFixture.w, detFixture.h, qPtr, camQuads.length, outPtr);
+  const itersWasmDet = 20;
+  const tDet0 = performance.now();
+  for (let i = 0; i < itersWasmDet; i++) {
+    dw.classify_batch(gPtr, detFixture.w, detFixture.h, qPtr, camQuads.length, outPtr);
+  }
+  const wasmDetMs = (performance.now() - tDet0) / itersWasmDet;
+  const detOut = new Float32Array(dw.memory.buffer, outPtr, camQuads.length * 5);
+  let validQuads = 0, acceptedQuads = 0;
+  for (let i = 0; i < camQuads.length; i++) {
+    if (detOut[i * 5] === 1) {
+      validQuads++;
+      if (detOut[i * 5 + 2] >= 0.88 && detOut[i * 5 + 3] >= 0.35 && detOut[i * 5 + 4] === 4) acceptedQuads++;
+    }
+  }
+  results.wasmSimdClassifier = {
+    quadsPerBatch: camQuads.length,
+    validQuads,
+    acceptedQuads,
+    msPerBatch: Number(wasmDetMs.toFixed(3)),
+    thousandQuadsPerSec: Number((camQuads.length / (wasmDetMs / 1000) / 1e3).toFixed(2)),
+  };
+
+  // 5. Benchmark WebGPU Classifier (detect.wgsl)
+  const detectWgsl = await (await fetch('../src/detect/detect.wgsl')).text();
+  const gpuDetector = await WebGpuDetector.create(detectWgsl);
+  const hillRgba = new Uint8Array(detFixture.w * detFixture.h * 4);
+  for (let i = 0; i < hillGray.length; i++) hillRgba[4 * i + 1] = hillGray[i];
+  gpuDetector.setImage(hillRgba, detFixture.w, detFixture.h);
+  gpuDetector.setRefs(detFixture.ref);
+  // Warmup
+  await gpuDetector.classifyBatch(flatQuads);
+  const itersGpuDet = 20;
+  const tGpuDet0 = performance.now();
+  let gpuDetRes;
+  for (let i = 0; i < itersGpuDet; i++) {
+    gpuDetRes = await gpuDetector.classifyBatch(flatQuads);
+  }
+  const gpuDetMs = (performance.now() - tGpuDet0) / itersGpuDet;
+  let gpuAccepted = 0;
+  for (let i = 0; i < camQuads.length; i++) {
+    if (gpuDetRes[i * 5] > 0.5 && gpuDetRes[i * 5 + 2] >= 0.88 && gpuDetRes[i * 5 + 3] >= 0.35 && gpuDetRes[i * 5 + 4] === 4) {
+      gpuAccepted++;
+    }
+  }
+  results.webgpuClassifier = {
+    quadsPerBatch: camQuads.length,
+    acceptedQuads: gpuAccepted,
+    msPerBatch: Number(gpuDetMs.toFixed(3)),
+    thousandQuadsPerSec: Number((camQuads.length / (gpuDetMs / 1000) / 1e3).toFixed(2)),
+  };
+  gpuDetector.destroy();
+
+  // 6. Benchmark WebGPU ECC Shader (ecc-shader.ts) on 32 savanna quads
+  const adapter = await navigator.gpu.requestAdapter();
+  const hasTimestamps = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({requiredFeatures: hasTimestamps ? ['timestamp-query'] : []});
+  const savImg = new Image();
+  savImg.src = './fixtures/savanna.png';
+  await new Promise((res, rej) => { savImg.onload = res; savImg.onerror = rej; });
+  const savTex = device.createTexture({
+    size: [savImg.width, savImg.height, 1],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  const savCanvas = document.createElement('canvas');
+  savCanvas.width = savImg.width; savCanvas.height = savImg.height;
+  const savCtx = savCanvas.getContext('2d');
+  savCtx.drawImage(savImg, 0, 0);
+  const savData = savCtx.getImageData(0, 0, savImg.width, savImg.height);
+  device.queue.writeTexture({texture: savTex}, savData.data.buffer, {bytesPerRow: savImg.width * 4}, [savImg.width, savImg.height, 1]);
+
+  const refsFloat = new Float32Array(refs4);
+  const refsBuf = device.createBuffer({size: refsFloat.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(refsBuf, 0, refsFloat);
+
+  const savBlocks = await (await fetch('./fixtures/savanna-blocks.json')).json();
+  const savQuads = [], savRots = [];
+  for (const t of savBlocks.trials || []) {
+    for (const b of t.orderedBlocks || []) {
+      savQuads.push(b.quad);
+      savRots.push(b.rotation);
+    }
+  }
+  const count = 32;
+  const entries = ['prepare', 'gaussian', 'gradients', 'warp_pixels', 'statistics', 'jacobian', 'normal_equations', 'update'];
+  const shaderMod = device.createShaderModule({code: eccShader});
+  const layout = device.createBindGroupLayout({
+    entries: [
+      {binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'uniform'}},
+      {binding: 1, visibility: GPUShaderStage.COMPUTE, texture: {sampleType: 'unfilterable-float'}},
+      {binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'read-only-storage'}},
+      {binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'storage'}},
+      {binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'storage'}},
+      {binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'storage'}},
+      {binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'storage'}},
+      {binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: {type: 'storage'}},
+    ],
+  });
+  const pipeLayout = device.createPipelineLayout({bindGroupLayouts: [layout]});
+  const pipelines = await Promise.all(entries.map(entryPoint => device.createComputePipelineAsync({layout: pipeLayout, compute: {module: shaderMod, entryPoint}})));
+  const rw = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+  const params = device.createBuffer({size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+  const states = device.createBuffer({size: count * 28 * 4, usage: rw});
+  const patch = device.createBuffer({size: count * 81920 * 4, usage: rw});
+  const pixels = device.createBuffer({size: count * 16384 * 5 * 4, usage: rw});
+  const jac = device.createBuffer({size: count * 16384 * 8 * 4, usage: rw});
+  const sums = device.createBuffer({size: count * 86 * 4, usage: rw});
+  const read = device.createBuffer({size: count * (28 + 86) * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST});
+
+  const initial = new Float32Array(count * 28);
+  for (let i = 0; i < count; i++) {
+    const b = quadBase(savQuads[i]);
+    const s = i * 28;
+    initial.set(b, s);
+    initial.set([1, 0, 0, 0, 1, 0, 0, 0, 1], s + 9);
+    initial[s + 18] = -1;
+    initial[s + 19] = -0.00001;
+    initial[s + 20] = b.every(Number.isFinite) ? 0 : -2;
+    initial[s + 22] = savRots[i];
+  }
+  device.queue.writeBuffer(params, 0, new Uint32Array([savImg.width, savImg.height, count, 0]));
+  device.queue.writeBuffer(states, 0, initial);
+
+  const bg = device.createBindGroup({
+    layout,
+    entries: [
+      {binding: 0, resource: {buffer: params}},
+      {binding: 1, resource: savTex.createView()},
+      {binding: 2, resource: {buffer: refsBuf}},
+      {binding: 3, resource: {buffer: states}},
+      {binding: 4, resource: {buffer: patch}},
+      {binding: 5, resource: {buffer: pixels}},
+      {binding: 6, resource: {buffer: jac}},
+      {binding: 7, resource: {buffer: sums}},
+    ],
+  });
+
+  let querySet, queryBuffer, queryReadback;
+  if (hasTimestamps) {
+    querySet = device.createQuerySet({type: 'timestamp', count: 14});
+    queryBuffer = device.createBuffer({size: 14 * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC});
+    queryReadback = device.createBuffer({size: 14 * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST});
+  }
+  const enc = device.createCommandEncoder();
+  for (const buf of [patch, pixels, jac, sums]) enc.clearBuffer(buf);
+  const pass = (c, idx, x, y = 1) => { c.setPipeline(pipelines[idx]); c.setBindGroup(0, bg); c.dispatchWorkgroups(x, y); };
+
+  const pPrep = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 2, endOfPassWriteIndex: 3}} : {});
+  pass(pPrep, 0, 256, count); pass(pPrep, 1, 256, count); pass(pPrep, 2, 256, count); pPrep.end();
+
+  const pWarp = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 4, endOfPassWriteIndex: 5}} : {});
+  pass(pWarp, 3, 256, count); pWarp.end();
+
+  const pStat = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 6, endOfPassWriteIndex: 7}} : {});
+  pass(pStat, 4, count, 1); pStat.end();
+
+  const pJac = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 8, endOfPassWriteIndex: 9}} : {});
+  pass(pJac, 5, 256, count); pJac.end();
+
+  const pNorm = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 10, endOfPassWriteIndex: 11}} : {});
+  pass(pNorm, 6, count, 1); pNorm.end();
+
+  const pUpd = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 12, endOfPassWriteIndex: 13}} : {});
+  pass(pUpd, 7, count, 1); pUpd.end();
+
+  const pIter = enc.beginComputePass(hasTimestamps ? {timestampWrites: {querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1}} : {});
+  for (let i = 1; i < 60; i++) {
+    pass(pIter, 3, 256, count);
+    pass(pIter, 4, count, 1);
+    pass(pIter, 5, 256, count);
+    pass(pIter, 6, count, 1);
+    pass(pIter, 7, count, 1);
+  }
+  pIter.end();
+
+  if (hasTimestamps) {
+    enc.resolveQuerySet(querySet, 0, 14, queryBuffer, 0);
+    enc.copyBufferToBuffer(queryBuffer, 0, queryReadback, 0, 14 * 8);
+  }
+  enc.copyBufferToBuffer(states, 0, read, 0, initial.byteLength);
+  const tEcc0 = performance.now();
+  device.queue.submit([enc.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const eccWallMs = performance.now() - tEcc0;
+  read.unmap();
+
+  let eccGpu = {};
+  if (hasTimestamps) {
+    await queryReadback.mapAsync(GPUMapMode.READ);
+    const qd = new BigInt64Array(queryReadback.getMappedRange());
+    const ns = (a, b) => Number(qd[b] - qd[a]) / 1e6;
+    const iter1 = ns(4, 5) + ns(6, 7) + ns(8, 9) + ns(10, 11) + ns(12, 13);
+    const totalGpuMs = ns(0, 1) + iter1;
+    eccGpu = {
+      prepMs: Number(ns(2, 3).toFixed(3)),
+      iter1BreakdownMs: {
+        warp_pixels: Number(ns(4, 5).toFixed(3)),
+        statistics: Number(ns(6, 7).toFixed(3)),
+        jacobian: Number(ns(8, 9).toFixed(3)),
+        normal_equations: Number(ns(10, 11).toFixed(3)),
+        update: Number(ns(12, 13).toFixed(3)),
+        sum1Iter: Number(iter1.toFixed(3)),
+      },
+      totalGpuMs: Number(totalGpuMs.toFixed(2)),
+      gpuMsPerQuad: Number((totalGpuMs / count).toFixed(3)),
+    };
+    queryReadback.unmap();
+  }
+  results.webgpuEcc = {
+    batchSize: count,
+    iterations: 60,
+    wallMs: Number(eccWallMs.toFixed(2)),
+    wallMsPerQuad: Number((eccWallMs / count).toFixed(3)),
+    ...eccGpu,
+  };
+
+  out.textContent = JSON.stringify(results, null, 2);
+  document.title = 'PASS';
+} catch (e) {
+  out.textContent = JSON.stringify({error: e.message, stack: e.stack, results}, null, 2);
+  document.title = 'FAIL';
+}
+</script>

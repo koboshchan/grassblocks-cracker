@@ -621,7 +621,8 @@ export async function verifyQuads(
   detector: WebGpuDetector,
   quads: number[][][],
   img: { width: number; height: number },
-  opts: VerifyOptions = {}
+  opts: VerifyOptions = {},
+  initialVerdicts?: (Verdict | null)[]
 ): Promise<(VerifiedQuad | null)[]> {
   const n = quads.length;
   if (n === 0) return [];
@@ -634,7 +635,7 @@ export async function verifyQuads(
   const refineVotes = opts.refineVotes !== undefined ? opts.refineVotes : 3;
   const refineShift = opts.refineShift !== undefined ? opts.refineShift : 3.5;
 
-  const initial = await classifyQuadsOnGpu(detector, quads);
+  const initial = initialVerdicts ?? (await classifyQuadsOnGpu(detector, quads));
   const out: (VerifiedQuad | null)[] = new Array(n).fill(null);
   const borderlineIndices: number[] = [];
 
@@ -805,13 +806,71 @@ export async function voxelStage(
     const cand: { q: number[][]; x: number; y: number; z: number }[] = [];
     const R = 30;
     const YR = 12;
+    const G = 2 * R + 2;
+    const w = img.width;
+    const h = img.height;
+    const gridU = new Float64Array(G * G);
+    const gridV = new Float64Array(G * G);
+    const gridD = new Float64Array(G * G);
 
     for (let y = -YR; y <= YR; y++) {
+      for (let gz = -R; gz <= R + 1; gz++) {
+        const row = (gz + R) * G;
+        for (let gx = -R; gx <= R + 1; gx++) {
+          const idx = row + (gx + R);
+          const d = P[8] * gx + P[9] * y + P[10] * gz + P[11];
+          gridD[idx] = d;
+          if (d > 0) {
+            gridU[idx] = (P[0] * gx + P[1] * y + P[2] * gz + P[3]) / d;
+            gridV[idx] = (P[4] * gx + P[5] * y + P[6] * gz + P[7]) / d;
+          }
+        }
+      }
+
       for (let z = -R; z <= R; z++) {
+        const row0 = (z + R) * G;
+        const row1 = (z + 1 + R) * G;
         for (let x = -R; x <= R; x++) {
-          const q = projectCamQuad(P, x, y, z, img.width, img.height);
-          if (!q) continue;
-          cand.push({ q, x, y, z });
+          const col = x + R;
+          const i0 = row0 + col;
+          const i1 = i0 + 1;
+          const i2 = row1 + col + 1;
+          const i3 = row1 + col;
+
+          if (gridD[i0] <= 0 || gridD[i1] <= 0 || gridD[i2] <= 0 || gridD[i3] <= 0) continue;
+          const u0 = gridU[i0], v0 = gridV[i0];
+          if (!(u0 >= 0 && u0 < w - 1 && v0 >= 0 && v0 < h - 1)) continue;
+          const u1 = gridU[i1], v1 = gridV[i1];
+          if (!(u1 >= 0 && u1 < w - 1 && v1 >= 0 && v1 < h - 1)) continue;
+          const u2 = gridU[i2], v2 = gridV[i2];
+          if (!(u2 >= 0 && u2 < w - 1 && v2 >= 0 && v2 < h - 1)) continue;
+          const u3 = gridU[i3], v3 = gridV[i3];
+          if (!(u3 >= 0 && u3 < w - 1 && v3 >= 0 && v3 < h - 1)) continue;
+
+          const z0 = (u1 - u0) * (v2 - v1) - (v1 - v0) * (u2 - u1);
+          const z1 = (u2 - u1) * (v3 - v2) - (v2 - v1) * (u3 - u2);
+          const z2 = (u3 - u2) * (v0 - v3) - (v3 - v2) * (u0 - u3);
+          const z3 = (u0 - u3) * (v1 - v0) - (v0 - v3) * (u1 - u0);
+          if (!((z0 > 0 && z1 > 0 && z2 > 0 && z3 > 0) || (z0 < 0 && z1 < 0 && z2 < 0 && z3 < 0))) {
+            continue;
+          }
+
+          if ((u1 - u0) * (u1 - u0) + (v1 - v0) * (v1 - v0) < 64) continue;
+          if ((u2 - u1) * (u2 - u1) + (v2 - v1) * (v2 - v1) < 64) continue;
+          if ((u3 - u2) * (u3 - u2) + (v3 - v2) * (v3 - v2) < 64) continue;
+          if ((u0 - u3) * (u0 - u3) + (v0 - v3) * (v0 - v3) < 64) continue;
+
+          cand.push({
+            q: [
+              [u0, v0],
+              [u1, v1],
+              [u2, v2],
+              [u3, v3],
+            ],
+            x,
+            y,
+            z,
+          });
         }
       }
     }
@@ -932,6 +991,22 @@ export async function voxelStage(
 
 /* ---------- Main Pipeline Function ---------- */
 
+interface TrialCache {
+  initialized?: boolean;
+  rawSeeds: Map<number, number[][][]>;
+  initialVerdicts: Map<number, (Verdict | null)[]>;
+  verifiedSeeds: Map<string, (VerifiedQuad | null)[]>;
+  planeBlocks?: Map<string, Block[]>;
+  voxelResults?: Map<string, { blocks: Block[]; P: number[]; heights: number[] } | { reason: string }>;
+  spectralBest?: {
+    rotation: number;
+    score: number;
+    margin: number;
+    votes: number;
+    quad: number[][];
+  } | null;
+}
+
 export async function runSingleGpuDetection(
   detector: WebGpuDetector,
   img: { width: number; height: number; data: Uint8Array },
@@ -955,41 +1030,80 @@ export async function runSingleGpuDetection(
     refineVotes: opts?.refineVotes,
     refineShift: opts?.refineShift,
   };
+  const trialCache: TrialCache | undefined = opts?.trialCache;
 
   progress('Initializing WebGPU detector image and reference patterns');
-  detector.setImage(img.data, img.width, img.height);
-  detector.setRefs(ref);
+  if (!trialCache?.initialized) {
+    detector.setImage(img.data, img.width, img.height);
+    detector.setRefs(ref);
+  }
 
-  let rawCandidates: any[] = [];
   const manual = Array.isArray(opts?.seeds) && opts.seeds.length > 0;
+  const siftRatio = opts?.siftRatio ?? 0.68;
+  let rawSeeds: number[][][];
 
-  if (manual) {
-    rawCandidates = opts.seeds;
-  } else if (Array.isArray(opts?.featureSeeds) && opts.featureSeeds.length > 0) {
-    rawCandidates = opts.featureSeeds;
-  } else if (typeof opts?.featureSeeds === 'function') {
-    try {
-      const res = await opts.featureSeeds(opts);
-      if (Array.isArray(res)) rawCandidates = res;
-    } catch (e) { throw e; }
-  } else if (Array.isArray(opts?.siftSeeds) && opts.siftSeeds.length > 0) {
-    rawCandidates = opts.siftSeeds;
-  } else if (typeof opts?.siftSeeds === 'function') {
-    try {
-      const res = await opts.siftSeeds();
-      if (Array.isArray(res)) rawCandidates = res;
-    } catch (e) {
-      console.warn('Failed to obtain sift seeds:', e);
+  if (trialCache && !manual && trialCache.rawSeeds.has(siftRatio)) {
+    rawSeeds = trialCache.rawSeeds.get(siftRatio)!;
+  } else {
+    let rawCandidates: any[] = [];
+
+    if (manual) {
+      rawCandidates = opts.seeds;
+    } else if (Array.isArray(opts?.featureSeeds) && opts.featureSeeds.length > 0) {
+      rawCandidates = opts.featureSeeds;
+    } else if (typeof opts?.featureSeeds === 'function') {
+      try {
+        const res = await opts.featureSeeds(opts);
+        if (Array.isArray(res)) rawCandidates = res;
+      } catch (e) { throw e; }
+    } else if (Array.isArray(opts?.siftSeeds) && opts.siftSeeds.length > 0) {
+      rawCandidates = opts.siftSeeds;
+    } else if (typeof opts?.siftSeeds === 'function') {
+      try {
+        const res = await opts.siftSeeds();
+        if (Array.isArray(res)) rawCandidates = res;
+      } catch (e) {
+        console.warn('Failed to obtain sift seeds:', e);
+      }
+    }
+
+    rawSeeds = rawCandidates
+      .map(c => parseQuad(c))
+      .filter((q): q is number[][] => q !== null)
+      .map(canonicalQuad);
+
+    if (trialCache && !manual) {
+      trialCache.rawSeeds.set(siftRatio, rawSeeds);
     }
   }
 
-  const rawSeeds = rawCandidates
-    .map(c => parseQuad(c))
-    .filter((q): q is number[][] => q !== null)
-    .map(canonicalQuad);
-
   progress(`Verifying ${rawSeeds.length} seed candidate(s) on GPU`);
-  const vs = await verifyQuads(detector, rawSeeds, img, verifyOpts);
+  const refineMin = opts?.refineMin ?? relaxed;
+  const refineMargin = opts?.refineMargin ?? margin;
+  const refineVotes = opts?.refineVotes ?? 3;
+  const refineShift = opts?.refineShift ?? 3.5;
+  const verifyKey = `${siftRatio}:${refineMin}:${refineMargin}:${refineVotes}:${refineShift}`;
+
+  let vs: (VerifiedQuad | null)[];
+  if (trialCache && !manual && trialCache.verifiedSeeds.has(verifyKey)) {
+    vs = trialCache.verifiedSeeds.get(verifyKey)!;
+  } else if (trialCache && !manual) {
+    let initial = trialCache.initialVerdicts.get(siftRatio);
+    if (!initial) {
+      initial = await classifyQuadsOnGpu(detector, rawSeeds);
+      trialCache.initialVerdicts.set(siftRatio, initial);
+    }
+    vs = await verifyQuads(
+      detector,
+      rawSeeds,
+      img,
+      { ...verifyOpts, refineMin, refineMargin, refineVotes, refineShift },
+      initial
+    );
+    trialCache.verifiedSeeds.set(verifyKey, vs);
+  } else {
+    vs = await verifyQuads(detector, rawSeeds, img, verifyOpts);
+  }
   let seeds: { rotation: number; score: number; margin: number; votes: number; quad: number[][] }[] = [];
 
   for (let i = 0; i < rawSeeds.length; i++) {
@@ -1034,10 +1148,15 @@ export async function runSingleGpuDetection(
   if (!seeds.length && !manual) {
     progress('Top-down spectral proposals: GPU correlation scan');
     let best: {rotation:number;score:number;margin:number;votes:number;quad:number[][]} | null=null;
-    let batch:number[][][]=[];
-    const flush=async()=>{const scores=await classifyQuadsOnGpu(detector,batch);scores.forEach((v,i)=>{if(v?.valid&&v.score>.72&&(!best||v.score>best.score))best={rotation:v.rotation,score:v.score,margin:v.margin,votes:v.votes,quad:batch[i]};});batch=[];};
-    for(const n of topDownSizes(img.data,img.width,img.height)){const step=Math.max(2,Math.floor(n/32));for(let y=0;y<img.height-n;y+=step)for(let x=0;x<img.width-n;x+=step){batch.push([[x,y],[x+n,y],[x+n,y+n],[x,y+n]]);if(batch.length===512)await flush();}}
-    if(batch.length)await flush();
+    if (trialCache && trialCache.spectralBest !== undefined) {
+      best = trialCache.spectralBest;
+    } else {
+      let batch:number[][][]=[];
+      const flush=async()=>{const scores=await classifyQuadsOnGpu(detector,batch);scores.forEach((v,i)=>{if(v?.valid&&v.score>.72&&(!best||v.score>best.score))best={rotation:v.rotation,score:v.score,margin:v.margin,votes:v.votes,quad:batch[i]};});batch=[];};
+      for(const n of topDownSizes(img.data,img.width,img.height)){const step=Math.max(2,Math.floor(n/32));for(let y=0;y<img.height-n;y+=step)for(let x=0;x<img.width-n;x+=step){batch.push([[x,y],[x+n,y],[x+n,y+n],[x,y+n]]);if(batch.length===32768)await flush();}}
+      if(batch.length)await flush();
+      if (trialCache) trialCache.spectralBest = best;
+    }
     if(best && (best as any).score>=accept)seeds.push(best);
   }
 
@@ -1073,7 +1192,18 @@ export async function runSingleGpuDetection(
   }
 
   progress(`Growing ${plane.ids.length} coplanar seed(s) across the ground plane`);
-  let blocks = await growPlane(detector, img, plane.H, 28, accept, margin, verifyOpts);
+  const planeCacheKey = trialCache && !manual
+    ? `${plane.H.join(',')}|${accept}|${margin}|${refineMin}|${refineMargin}|${refineVotes}|${refineShift}`
+    : '';
+  let blocks: Block[];
+  if (planeCacheKey && trialCache?.planeBlocks?.has(planeCacheKey)) {
+    blocks = trialCache.planeBlocks.get(planeCacheKey)!.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) }));
+  } else {
+    blocks = await growPlane(detector, img, plane.H, 28, accept, margin, verifyOpts);
+    if (planeCacheKey && trialCache?.planeBlocks) {
+      trialCache.planeBlocks.set(planeCacheKey, blocks.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) })));
+    }
+  }
   let mode = 'planar lattice (all y=0)';
   let camera: number[] | null = null;
 
@@ -1089,7 +1219,18 @@ export async function runSingleGpuDetection(
       }
       const H = homography(src, dst);
       if (!H) break;
-      const next = await growPlane(detector, img, H, 28, accept, margin, verifyOpts);
+      const refitKey = trialCache && !manual
+        ? `${H.join(',')}|${accept}|${margin}|${refineMin}|${refineMargin}|${refineVotes}|${refineShift}`
+        : '';
+      let next: Block[];
+      if (refitKey && trialCache?.planeBlocks?.has(refitKey)) {
+        next = trialCache.planeBlocks.get(refitKey)!.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) }));
+      } else {
+        next = await growPlane(detector, img, H, 28, accept, margin, verifyOpts);
+        if (refitKey && trialCache?.planeBlocks) {
+          trialCache.planeBlocks.set(refitKey, next.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) })));
+        }
+      }
       if (next.length <= blocks.length) break;
       blocks = next;
       plane.H = H;
@@ -1098,13 +1239,39 @@ export async function runSingleGpuDetection(
   }
 
   progress('Trying 3D voxel lattice for other heights');
-  const v = await voxelStage(
-    detector,
-    img,
-    plane.H,
-    { relaxed, margin, refitFlat, ...verifyOpts },
-    progress
-  );
+  const voxelExactKey = trialCache && !manual
+    ? `${plane.H.join(',')}|${accept}|${relaxed}|${margin}|${refitFlat ? 1 : 0}|${refineMin}|${refineMargin}|${refineVotes}|${refineShift}`
+    : '';
+  const voxelMultiHeightKey = trialCache && !manual
+    ? `${plane.H.join(',')}|${accept}|${relaxed}|${margin}|*|${refineMin}|${refineMargin}|${refineVotes}|${refineShift}`
+    : '';
+  let v: { blocks: Block[]; P: number[]; heights: number[] } | { reason: string };
+  const cachedVoxel = voxelExactKey
+    ? (trialCache?.voxelResults?.get(voxelExactKey) ?? trialCache?.voxelResults?.get(voxelMultiHeightKey))
+    : undefined;
+  if (cachedVoxel) {
+    v = 'blocks' in cachedVoxel
+      ? { blocks: cachedVoxel.blocks.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) })), P: cachedVoxel.P.slice(), heights: cachedVoxel.heights.slice() }
+      : { ...cachedVoxel };
+  } else {
+    v = await voxelStage(
+      detector,
+      img,
+      plane.H,
+      { relaxed, margin, refitFlat, ...verifyOpts },
+      progress
+    );
+    if (voxelExactKey && trialCache?.voxelResults) {
+      const stored = 'blocks' in v
+        ? { blocks: v.blocks.map(b => ({ ...b, quad: b.quad.map(p => p.slice()) })), P: v.P.slice(), heights: v.heights.slice() }
+        : { ...v };
+      trialCache.voxelResults.set(voxelExactKey, stored);
+      // When heights.length !== 1 (or no voxels verified), voxelStage never branches on refitFlat.
+      if (!('blocks' in v) || v.heights.length !== 1) {
+        trialCache.voxelResults.set(voxelMultiHeightKey, stored);
+      }
+    }
+  }
   if ('blocks' in v && v.blocks && v.blocks.length >= blocks.length) {
     blocks = v.blocks;
     mode = `3D voxel lattice (heights ${v.heights.join(',')})`;
@@ -1130,13 +1297,16 @@ export async function runWebGpuDetection(detector:WebGpuDetector,img:{width:numb
  const started=performance.now();
  const automatic=!(opts.seeds?.length);
  const configs=automatic?GPU_TRIALS:[['manual',opts] as const];
+ detector.setImage(img.data,img.width,img.height);
+ detector.setRefs(ref);
+ const trialCache:TrialCache={initialized:true,rawSeeds:new Map(),initialVerdicts:new Map(),verifiedSeeds:new Map(),planeBlocks:new Map(),voxelResults:new Map(),spectralBest:undefined};
  let first:DetectionResult|undefined,merged:Block[]=[];const trials:any[]=[];
- for(const [name,config] of configs){
-  const trialOpts=automatic?{...opts,...config}:opts;
-  progress(`GPU trial ${trials.length+1}/${configs.length} ${name}`);
+ for(const [i,[name,tOpts]] of configs.entries()){
+  const trialOpts=automatic?{...opts,...tOpts,trialCache}:{...opts,trialCache};
+  progress(`GPU trial ${i+1}/${configs.length} ${name}`);
   const result=await runSingleGpuDetection(detector,img,ref,trialOpts,text=>progress(`${name}: ${text}`));
   if(!first){first=result;merged=result.blocks;}else merged=mergeGpuAligned(merged,result.blocks);
-  trials.push({name,tiles:result.blocks.length,seeds:result.seeds.length,mergedTiles:merged.length,seconds:result.seconds,settings:config,orderedBlocks:result.blocks,verifiedSeeds:result.seeds});
+  trials.push({name,tiles:result.blocks.length,seeds:result.seeds.length,mergedTiles:merged.length,seconds:result.seconds,settings:tOpts,orderedBlocks:result.blocks,verifiedSeeds:result.seeds});
  }
  return {...first!,blocks:merged,camera:automatic?null:first!.camera,planeH:automatic?null:first!.planeH,seconds:(performance.now()-started)/1000,trials};
 }

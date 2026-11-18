@@ -16,16 +16,15 @@ ulong rotation_xz(int x,int z){
 uint rotation_y(ulong xz,int y){
  ulong l=xz^ulong(int64_t(y));
  l=l*l*42317861ULL+l*11ULL;
- ulong seed=(((l>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- return uint(seed>>46);
+ return uint((((l>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
 }
 uint2 rotation_y2(ulong xz,int y0,int y1){
  ulong l0=xz^ulong(int64_t(y0)),l1=xz^ulong(int64_t(y1));
  l0=l0*l0*42317861ULL+l0*11ULL;
  l1=l1*l1*42317861ULL+l1*11ULL;
- ulong s0=(((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- ulong s1=(((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- return uint2(uint(s0>>46),uint(s1>>46));
+ uint r0=uint((((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ uint r1=uint((((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ return uint2(r0,r1);
 }
 uint4 rotation_y4(ulong xz,int y0,int y1,int y2,int y3){
  ulong l0=xz^ulong(int64_t(y0)),l1=xz^ulong(int64_t(y1)),l2=xz^ulong(int64_t(y2)),l3=xz^ulong(int64_t(y3));
@@ -33,24 +32,24 @@ uint4 rotation_y4(ulong xz,int y0,int y1,int y2,int y3){
  l1=l1*l1*42317861ULL+l1*11ULL;
  l2=l2*l2*42317861ULL+l2*11ULL;
  l3=l3*l3*42317861ULL+l3*11ULL;
- ulong s0=(((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- ulong s1=(((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- ulong s2=(((l2>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- ulong s3=(((l3>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)&0xFFFFFFFFFFFFULL;
- return uint4(uint(s0>>46),uint(s1>>46),uint(s2>>46),uint(s3>>46));
+ uint r0=uint((((l0>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ uint r1=uint((((l1>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ uint r2=uint((((l2>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ uint r3=uint((((l3>>16)^0x5DEECE66DULL)*0x5DEECE66DULL+11ULL)>>46)&3u;
+ return uint4(r0,r1,r2,r3);
 }
 uint rotation(int x,int y,int z){
  return rotation_y(rotation_xz(x,z),y);
 }
 void emit(device uint*results,uint val){uint slot=atomic_fetch_add_explicit((device atomic_uint*)results,1u,memory_order_relaxed);results[slot+1]=val;}
-bool matched_north(device const Block*blocks,uint nb,uint north,int x,int y,int z){
- device const Block*b=blocks+north*nb;
+bool matched_north(constant Block*blocks,uint nb,uint north,int x,int y,int z,thread const ulong*xz1){
+ constant Block*b=blocks+north*nb;
  uint bound=min(nb,8u);
  #pragma unroll
  for(uint i=1;i<8;i++){
   if(i>=bound)break;
   Block bi=b[i];
-  uint r=rotation(x+bi.x,y+bi.y,z+bi.z);
+  uint r=i==1u?rotation_y(xz1[north],y+bi.y):rotation(x+bi.x,y+bi.y,z+bi.z);
   if((r&(bi.side?1u:3u))!=uint(bi.r))return false;
  }
  for(uint i=8;i<nb;i++){
@@ -60,25 +59,25 @@ bool matched_north(device const Block*blocks,uint nb,uint north,int x,int y,int 
  }
  return true;
 }
-inline void check_anchor(device const Block*blocks,device uint*results,constant Params&p,
- uint index,int x,int y,int z,uint rot){
+inline void check_anchor(constant Block*blocks,device uint*results,constant Params&p,
+ uint index,int x,int y,int z,uint rot,thread const ulong*xz1){
  if(p.anchor_side){
   uint n0=(rot-uint(p.anchor_r))&1u;
-  if((p.active_norths&(1u<<n0))&&matched_north(blocks,p.nb,n0,x,y,z)){
+  if((p.active_norths&(1u<<n0))&&matched_north(blocks,p.nb,n0,x,y,z,xz1)){
    emit(results,(index<<2)|n0);
   }
   uint n1=n0+2u;
-  if((p.active_norths&(1u<<n1))&&matched_north(blocks,p.nb,n1,x,y,z)){
+  if((p.active_norths&(1u<<n1))&&matched_north(blocks,p.nb,n1,x,y,z,xz1)){
    emit(results,(index<<2)|n1);
   }
  }else{
   uint n=(rot-uint(p.anchor_r))&3u;
-  if((p.active_norths&(1u<<n))&&matched_north(blocks,p.nb,n,x,y,z)){
+  if((p.active_norths&(1u<<n))&&matched_north(blocks,p.nb,n,x,y,z,xz1)){
    emit(results,(index<<2)|n);
   }
  }
 }
-kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [[buffer(1)]],constant Params&p [[buffer(2)]],uint tid [[thread_position_in_grid]]){
+kernel void search(constant Block*blocks [[buffer(0)]],device uint*results [[buffer(1)]],constant Params&p [[buffer(2)]],uint tid [[thread_position_in_grid]]){
  for(uint item=0;item<p.items;item++){
   uint task=tid+item*p.threads;
   if(p.fast){
@@ -89,18 +88,36 @@ kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [
    uint begin=task==0?p.yoff:0u;
    uint end=min(ny,p.count+p.yoff-task*ny);
    ulong xz0=rotation_xz(x,z);
+   ulong xz1[4]={0,0,0,0};
+   if(p.nb>1u){
+    for(uint n=0;n<4u;n++){
+     if(p.active_norths&(1u<<n)){
+      Block b1=blocks[n*p.nb+1u];
+      xz1[n]=rotation_xz(x+b1.x,z+b1.z);
+     }
+    }
+   }
    uint yy=begin;
+   for(;yy+3u<end;yy+=4u){
+    int yA=int(int64_t(p.ymin)+yy);
+    int yB=yA+1,yC=yA+2,yD=yA+3;
+    uint4 r0=rotation_y4(xz0,yA,yB,yC,yD);
+    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,yA,z,r0.x,xz1);
+    check_anchor(blocks,results,p,task*ny+(yy+1u)-p.yoff,x,yB,z,r0.y,xz1);
+    check_anchor(blocks,results,p,task*ny+(yy+2u)-p.yoff,x,yC,z,r0.z,xz1);
+    check_anchor(blocks,results,p,task*ny+(yy+3u)-p.yoff,x,yD,z,r0.w,xz1);
+   }
    for(;yy+1u<end;yy+=2u){
     int yA=int(int64_t(p.ymin)+yy);
     int yB=yA+1;
     uint2 r0=rotation_y2(xz0,yA,yB);
-    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,yA,z,r0.x);
-    check_anchor(blocks,results,p,task*ny+(yy+1u)-p.yoff,x,yB,z,r0.y);
+    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,yA,z,r0.x,xz1);
+    check_anchor(blocks,results,p,task*ny+(yy+1u)-p.yoff,x,yB,z,r0.y,xz1);
    }
    for(;yy<end;yy++){
     int y=int(int64_t(p.ymin)+yy);
     uint r0=rotation_y(xz0,y);
-    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,y,z,r0);
+    check_anchor(blocks,results,p,task*ny+yy-p.yoff,x,y,z,r0,xz1);
    }
   }else{
    uint index=task;if(index>=p.count)break;
@@ -108,8 +125,17 @@ kernel void search(device const Block*blocks [[buffer(0)]],device uint*results [
    int y=int(int64_t(p.ymin)+int64_t(id%p.ny));id/=p.ny;
    int z=int(int64_t(p.zmin)+int64_t(id%p.nz));id/=p.nz;
    int x=int(int64_t(p.xmin)+int64_t(id));
+   ulong xz1[4]={0,0,0,0};
+   if(p.nb>1u){
+    for(uint n=0;n<4u;n++){
+     if(p.active_norths&(1u<<n)){
+      Block b1=blocks[n*p.nb+1u];
+      xz1[n]=rotation_xz(x+b1.x,z+b1.z);
+     }
+    }
+   }
    uint r0=rotation(x,y,z);
-   check_anchor(blocks,results,p,index,x,y,z,r0);
+   check_anchor(blocks,results,p,index,x,y,z,r0,xz1);
   }
  }
 })MSL";

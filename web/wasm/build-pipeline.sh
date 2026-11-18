@@ -31,7 +31,7 @@ if [ "$MODE" != link ]; then
     -DCMAKE_CXX_FLAGS="-O3 -ffp-contract=off -fexceptions" \
     -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
     -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
-    -DBUILD_LIST=core,imgproc,features2d,flann,calib3d,video \
+    -DBUILD_LIST=core,imgproc,features2d,flann,calib3d \
     -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
     -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_opencv_js=OFF \
     -DBUILD_opencv_dnn=OFF -DBUILD_opencv_python2=OFF -DBUILD_opencv_python3=OFF \

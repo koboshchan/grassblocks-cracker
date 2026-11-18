@@ -1,5 +1,6 @@
 import workerSource from './solver-worker.ts?worker';
-import {turnBlocks,validate,type Block,type SearchOptions} from './hash';
+import {turnBlocks as rawTurnBlocks,validate,type Block,type SearchOptions} from './hash';
+const turnBlocks=(blocks:Block[],n:number)=>rawTurnBlocks(blocks,n).sort((a,b)=>a.is_side-b.is_side);
 export async function createSolver({backend='auto',workers}:{backend?:'auto'|'cpu'|'gpu';workers?:number}={}) {
  if(backend!=='cpu'&&navigator.gpu) {
   try {return await gpuSolver();}catch(e){if(backend==='gpu')throw e;console.warn('WebGPU unavailable; using CPU WASM',e);}
@@ -9,24 +10,47 @@ export async function createSolver({backend='auto',workers}:{backend?:'auto'|'cp
 function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
  const anchorIdx = Math.max(0, blocks.findIndex(b => b.is_side === 0));
  const anchor = blocks[anchorIdx] || blocks[0];
- const xA = anchor.x, yA = anchor.y, zA = anchor.z, rA = anchor.rotation;
- const centered = [anchor, ...blocks.filter((_, i) => i !== anchorIdx)].map(b => ({
+ const xA = anchor.x, yA = anchor.y, zA = anchor.z, rA = anchor.rotation, sideA = anchor.is_side;
+ const centered = [anchor, ...blocks.filter((_, i) => i !== anchorIdx).sort((a, b) => a.is_side - b.is_side)].map(b => ({
   ...b,
   x: b.x - xA,
   y: b.y - yA,
   z: b.z - zA,
  }));
  const data = new Int32Array(centered.length * 16);
+ const mblocks = new Int32Array(4 * 512 * 5);
+ let activeMask = 0;
+ let minRx = Infinity, maxRx = -Infinity, minRz = Infinity, maxRz = -Infinity;
+ const rotRx = [0, 0, 0, 0], rotRz = [0, 0, 0, 0];
+ for (let n = 0; n < 4; n++) {
+  let ax = xA, az = zA;
+  for (let j = 0; j < n; j++) [ax, az] = [-az, ax];
+  rotRx[n] = ax; rotRz[n] = az;
+  if (activeNorth.includes(n)) {
+   activeMask |= 1 << n;
+   if (ax < minRx) minRx = ax;
+   if (ax > maxRx) maxRx = ax;
+   if (az < minRz) minRz = az;
+   if (az > maxRz) maxRz = az;
+  }
+ }
  for (let i = 0; i < centered.length; i++) {
   const b = centered[i];
   const off = i * 16;
   for (let n = 0; n < 4; n++) {
+   let x = b.x, z = b.z;
+   for (let j = 0; j < n; j++) [x, z] = [-z, x];
+   const rot = (b.rotation + n) % (b.is_side ? 2 : 4);
+   const moff = (n * 512 + i) * 5;
+   mblocks[moff] = x;
+   mblocks[moff + 1] = b.y;
+   mblocks[moff + 2] = z;
+   mblocks[moff + 3] = rot;
+   mblocks[moff + 4] = b.is_side;
    if (activeNorth.includes(n)) {
-    let x = b.x, z = b.z;
-    for (let j = 0; j < n; j++) [x, z] = [-z, x];
     data[off + n] = x;
     data[off + 4 + n] = z;
-    data[off + 8 + n] = (b.rotation + n) % (b.is_side ? 2 : 4);
+    data[off + 8 + n] = rot;
    } else {
     data[off + n] = 0;
     data[off + 4 + n] = 0;
@@ -38,7 +62,7 @@ function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
   data[off + 14] = 0;
   data[off + 15] = 0;
  }
- return { data, xA, yA, zA, rA };
+ return { data, mblocks, nb: centered.length, activeMask, xA, yA, zA, rA, sideA, rotRx, rotRz, minRx, maxRx, minRz, maxRz };
 }
 
 async function gpuSolver(){
@@ -52,10 +76,10 @@ async function gpuSolver(){
  if(errors.length)throw Error(errors.map(e=>e.message).join('\n'));
  const blockLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
  const layout=device.createPipelineLayout({bindGroupLayouts:[blockLayout]});
- let wg=256,items=1;
+ let wg=128,items=1;
  let pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});
  let tuned=false;let tuning:any=null;
- const RING_SIZE=3;
+ const RING_SIZE=4;
  const resultSize=16+4096*16;
  const results=Array.from({length:RING_SIZE},()=>device.createBuffer({size:resultSize,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}));
  const reads=Array.from({length:RING_SIZE},()=>device.createBuffer({size:resultSize,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}));
@@ -77,8 +101,12 @@ async function gpuSolver(){
  const total=validate(blocks,opts),matches:any[]=[],start=performance.now();let done=0,stopped=false;
  const limit=opts.stopOnFirst?1:(opts.maxMatches??100000);
  const stopReason=()=>stopped?(opts.stopOnFirst?'first match':'result limit'):undefined;
- const emit=()=>opts.onProgress?.({done,total,seconds:(performance.now()-start)/1000,rate:done/Math.max(.001,(performance.now()-start)/1000)});
+ const emit=()=>opts.onProgress?.({done:Math.min(done,total),total,seconds:(performance.now()-start)/1000,rate:Math.min(done,total)/Math.max(.001,(performance.now()-start)/1000)});
  const packed = packMultiNorthBlocks(blocks, opts.north);
+ const axMin = opts.xmin + packed.minRx, axMax = opts.xmax + packed.maxRx;
+ const ayMin = opts.ymin + packed.yA, ayMax = opts.ymax + packed.yA;
+ const azMin = opts.zmin + packed.minRz, azMax = opts.zmax + packed.maxRz;
+ const hasOffsetShift = packed.minRx !== packed.maxRx || packed.minRz !== packed.maxRz;
  blockBuffer=device.createBuffer({size:Math.max(64, packed.data.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
  const groups=Array.from({length:RING_SIZE},(_,i)=>device.createBindGroup({
   layout:blockLayout,
@@ -88,20 +116,20 @@ async function gpuSolver(){
    {binding:2,resource:{buffer:results[i]}},
   ]
  }));
- par[0]=opts.xmin;par[1]=opts.zmin;par[2]=opts.ymin;par[3]=Math.min(opts.ymax,opts.ymin+31);par[4]=1024;par[5]=0;par[6]=0;par[7]=blocks.length;
+ par[0]=axMin;par[1]=azMin;par[2]=ayMin;par[3]=Math.min(ayMax,ayMin+31);par[4]=1024;par[5]=0;par[6]=0;par[7]=blocks.length;
  for(let i=0;i<RING_SIZE;i++){
   device.queue.writeBuffer(params[i],0,par);
   device.queue.writeBuffer(results[i],0,zero4);
  }
  device.queue.writeBuffer(blockBuffer,0,packed.data);
- let target=65536;
+ let target=131072;
  if(!tuned){
  let cached:any=null;try{cached=JSON.parse(localStorage.getItem(cacheKey)||'null');}catch{}
  if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
  wg=cached.wg;items=cached.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...cached,cached:true};
  }else{
- const trials:any[]=[];const count=262144,benchY=Math.min(opts.ymax,opts.ymin+31);
- par[0]=opts.xmin;par[1]=opts.zmin;par[2]=opts.ymin;par[3]=benchY;par[4]=1024;par[5]=0;par[6]=count;par[7]=blocks.length;
+ const trials:any[]=[];const count=262144,benchY=Math.min(ayMax,ayMin+31);
+ par[0]=axMin;par[1]=azMin;par[2]=ayMin;par[3]=benchY;par[4]=1024;par[5]=0;par[6]=count;par[7]=blocks.length;
  device.queue.writeBuffer(params[0],0,par);
  tuneLoop: for(const w of [64,128,256])for(const it of [1,2,4]){
   await opts.waitIfPaused?.();if(opts.signal?.aborted)break tuneLoop;
@@ -112,7 +140,7 @@ async function gpuSolver(){
   }
   trials.push({wg:w,items:it,ms:Math.min(...times)});
  }
- trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:256,items:1,ms:0};wg=best.wg;items=best.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...best,trials,cached:false};
+ trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:128,items:1,ms:0};wg=best.wg;items=best.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...best,trials,cached:false};
  if(!opts.signal?.aborted&&trials.length===9){try{localStorage.setItem(cacheKey,JSON.stringify(best));}catch{}}
  }
  if(!opts.signal?.aborted)tuned=true;
@@ -132,7 +160,7 @@ async function gpuSolver(){
   await task.mapPromise;
   const elapsed=performance.now()-task.tSubmit;
   const ratio=Math.max(0.5,Math.min(2,40/Math.max(1,elapsed)));
-  target=Math.min(1048576,Math.max(256,Math.round((target*ratio)/256)*256));
+  target=Math.min(524288,Math.max(256,Math.round((target*ratio)/256)*256));
   const read=reads[task.slot];
   const mapped=new Int32Array(read.getMappedRange());
   const found=mapped[0]>>>0;
@@ -147,9 +175,9 @@ async function gpuSolver(){
   for(let i=0;i<found&&matches.length<limit;i++){
    const j=4+i*4;
    const wx=mapped[j],wy=mapped[j+1],wz=mapped[j+2],n=mapped[j+3];
-   let rx=packed.xA, rz=packed.zA;
-   for(let k=0;k<n;k++) [rx,rz]=[-rz,rx];
-   const m={x:wx-rx,y:wy-packed.yA,z:wz-rz,north:n};
+   const ox=wx-packed.rotRx[n],oy=wy-packed.yA,oz=wz-packed.rotRz[n];
+   if(hasOffsetShift&&(ox<opts.xmin||ox>opts.xmax||oz<opts.zmin||oz>opts.zmax))continue;
+   const m={x:ox,y:oy,z:oz,north:n};
    matches.push(m);opts.onMatch?.(m);
   }
   read.unmap();
@@ -177,19 +205,18 @@ async function gpuSolver(){
   currentSlot=0;
  }
 
- let lastYield=performance.now();
- for(let ya=opts.ymin;ya<=opts.ymax;ya+=32){
-  const yb=Math.min(opts.ymax,ya+31);
-  for(let za=opts.zmin;za<=opts.zmax;za+=128){
-  const zh=Math.min(128,opts.zmax-za+1);
-  for(let xa=opts.xmin;xa<=opts.xmax;xa+=4096){
-  const width=Math.min(4096,opts.xmax-xa+1),size=width*zh;
+ const Y_STEP=opts.north.length>1?64:32;
+ for(let ya=ayMin;ya<=ayMax;ya+=Y_STEP){
+  const yb=Math.min(ayMax,ya+Y_STEP-1);
+  for(let za=azMin;za<=azMax;za+=256){
+  const zh=Math.min(256,azMax-za+1);
+  for(let xa=axMin;xa<=axMax;xa+=4096){
+  const width=Math.min(4096,axMax-xa+1),size=width*zh;
   for(let off=0;off<size;){
   await opts.waitIfPaused?.();if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)break;
   const count=Math.min(target,size-off);
   await dispatchChunk(xa,za,width,off,count,ya,yb);
   off+=count;
-  if(performance.now()-lastYield>=16){await new Promise(r=>setTimeout(r,0));lastYield=performance.now();}
   }
   if(opts.signal?.aborted||stopped)break;
   }
@@ -198,6 +225,7 @@ async function gpuSolver(){
   if(opts.signal?.aborted||stopped)break;
  }
  await flush();
+ if(!opts.signal?.aborted&&!stopped)done=total;
  emit();const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!opts.signal?.aborted,stopped,stopReason:stopReason()};
  }finally{
   for(const task of inFlight){try{await task.mapPromise;reads[task.slot].unmap();}catch{}}
@@ -207,6 +235,7 @@ async function gpuSolver(){
  }
  },destroy(){device.destroy();}};
 }
+
 function cpuSolver(requested?:number){
  const adapterInfo={description:'WebAssembly SIMD CPU workers'};
  let running=false;
@@ -218,68 +247,73 @@ function cpuSolver(requested?:number){
  const cancel=()=>{if(sharedCancel)Atomics.store(sharedCancel,0,1);};
  o.signal?.addEventListener('abort',cancel,{once:true});
  try{
- const total=validate(blocks,o),matches=[],start=performance.now();let done=0,stopped=false;let stopReason:'first match'|'result limit'|undefined;
- // One fixed-y,z row task avoids lossy 64-bit linear indices. Independent workers
- // use transferable result buffers; SAB is not required to use multiple cores.
+ const dedupedNorth=Array.isArray(o.north)?[...new Set(o.north)]:o.north;
+ const opts={...o,north:dedupedNorth as number[]};
+ const total=validate(blocks,opts),matches:any[]=[],start=performance.now();let done=0,stopped=false;let stopReason:'first match'|'result limit'|undefined;
  const hardware=Math.max(1,Math.floor(navigator.hardwareConcurrency||2));
  const count=Math.max(1,Math.min(8,hardware,Number.isFinite(requested)?Math.floor(requested!):hardware));
- let nIndex=0,y=o.ymin,z=o.zmin,x=o.xmin,finished=false;
+ const packed=packMultiNorthBlocks(blocks,opts.north);
+ const axMin=opts.xmin+packed.minRx,axMax=opts.xmax+packed.maxRx;
+ const ayMin=opts.ymin+packed.yA,ayMax=opts.ymax+packed.yA;
+ const azMin=opts.zmin+packed.minRz,azMax=opts.zmax+packed.maxRz;
+ const hasOffsetShift=packed.minRx!==packed.maxRx||packed.minRz!==packed.maxRz;
+
+ // Partition into ~262,144-coordinate 3D boxes so worker postMessage overhead is negligible even on narrow x ranges.
+ const fullWidth=axMax-axMin+1,fullY=ayMax-ayMin+1;
+ const xChunk=Math.min(32768,fullWidth);
+ const yChunk=xChunk>=262144?1:Math.max(1,Math.min(fullY,Math.floor(262144/xChunk)));
+ const zChunk=xChunk*yChunk>=262144?1:Math.max(1,Math.min(azMax-azMin+1,Math.floor(262144/(xChunk*yChunk))));
+
+ let curZ=azMin,curY=ayMin,curX=axMin,finished=false;
  function next(){
- if(finished||stopped||o.signal?.aborted)return null;
- const task={x,z,y,count:Math.min(32768,o.xmax-x+1),north:o.north[nIndex],blocks:turnBlocks(blocks,o.north[nIndex])};
- x+=task.count;if(x>o.xmax){x=o.xmin;z++;if(z>o.zmax){z=o.zmin;y++;if(y>o.ymax){y=o.ymin;nIndex++;if(nIndex>=o.north.length)finished=true;}}}
- return task;
+  if(finished||stopped||opts.signal?.aborted)return null;
+  const xc=Math.min(xChunk,axMax-curX+1);
+  const yb=Math.min(ayMax,curY+yChunk-1);
+  const zb=Math.min(azMax,curZ+zChunk-1);
+  const tested=xc*(yb-curY+1)*(zb-curZ+1)*opts.north.length;
+  const task={multi:true,xmin:curX,xcount:xc,ymin:curY,ymax:yb,zmin:curZ,zmax:zb,tested};
+  curX+=xc;
+  if(curX>axMax){curX=axMin;curY=yb+1;if(curY>ayMax){curY=ayMin;curZ=zb+1;if(curZ>azMax)finished=true;}}
+  return task;
  }
- await Promise.all(Array.from({length:count},async()=>{
- const blobURL=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));
- const worker=new Worker(blobURL,{type:'module'});URL.revokeObjectURL(blobURL);pool.push(worker);
- await new Promise<void>((res,rej)=>{worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res();worker.onerror=e=>rej(Error(e.message));worker.postMessage({init:true,wasmUrl:new URL('./solver.wasm',import.meta.url).href});});
- }));
- const runTask=(worker:Worker,task:any)=>new Promise<{xs:ArrayBuffer;tested?:number}>((res,rej)=>{
- worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage({...task,sharedCancel});
+
+ const wasmUrl=new URL('./solver.wasm',import.meta.url).href;
+ const runMsg=(worker:Worker,msg:any)=>new Promise<any>((res,rej)=>{
+  worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage(msg);
  });
- let active=count;
- tuning={workers:count,skipped:total<1000000,cached:false};
- if(total>=1000000&&!o.signal?.aborted){
- // Version changes whenever the SIMD kernel or calibration workload changes.
- // Exact formation and problem shape prevent transferring an early-reject win
- // to a dense search. Calibration results never count as searched coordinates.
- const key='grass-cpu-simd-v1:'+JSON.stringify([hardware,count,blocks,o.xmin,o.xmax,o.ymin,o.ymax,o.zmin,o.zmax,o.north]);
- const candidates=[1,2,4,8].filter(n=>n<=count);
- let cached:any=null;try{cached=JSON.parse(localStorage.getItem(key)||'null');}catch{}
- if(cached&&candidates.includes(cached.workers)){active=cached.workers;tuning={...cached,cached:true};}
- else{
- const turned=turnBlocks(blocks,o.north[0]),width=o.xmax-o.xmin+1;
- const jobs=Array.from({length:32},(_,i)=>{const offset=(i*2048)%width;return {x:o.xmin+offset,y:o.ymin,z:o.zmin,count:Math.min(2048,width-offset),blocks:turned};});
- // All workers are ready before timing, and every candidate scans the same
- // bounded aggregate jobs using the actual WASM SIMD scan and result transport.
- await Promise.all(pool.map(async w=>{await o.waitIfPaused?.();if(!o.signal?.aborted)await runTask(w,{...jobs[0],count:Math.min(4,width)});}));
- const trials:{workers:number;ms:number}[]=[];
- for(const n of candidates){
- if(o.signal?.aborted)break;
- let cursor=0;const before=performance.now();
- await Promise.all(pool.slice(0,n).map(async w=>{while(!o.signal?.aborted){await o.waitIfPaused?.();if(o.signal?.aborted)break;const job=jobs[cursor++];if(!job)break;await runTask(w,job);}}));
- if(!o.signal?.aborted)trials.push({workers:n,ms:performance.now()-before});
- }
- if(!o.signal?.aborted){
- const best=trials.reduce((a,b)=>b.ms<a.ms?b:a);active=best.workers;
- tuning={...best,trials,cached:false,benchmarkCandidates:jobs.reduce((n,t)=>n+t.count,0)};
- try{localStorage.setItem(key,JSON.stringify(tuning));}catch{}
- }
- }
- }
- await Promise.all(pool.slice(0,active).map(async worker=>{
- for(;;){if(stopped||o.signal?.aborted)break;await o.waitIfPaused?.();const task=next();if(!task)break;
- const r=await runTask(worker,task);
- for(const mx of new Int32Array(r.xs)){
- if(stopped)break;
- const m={x:mx,y:task.y,z:task.z,north:task.north};matches.push(m);o.onMatch?.(m);
- if(o.stopOnFirst||matches.length>=(o.maxMatches??100000)){stopped=true;stopReason=o.stopOnFirst?'first match':'result limit';break;}
- }
- done+=r.tested??task.count;const seconds=(performance.now()-start)/1000;o.onProgress?.({done,total,seconds,rate:done/seconds});
- }
+ await Promise.all(Array.from({length:count},async()=>{
+  const blobURL=URL.createObjectURL(new Blob([workerSource],{type:'text/javascript'}));
+  const worker=new Worker(blobURL,{type:'module'});URL.revokeObjectURL(blobURL);pool.push(worker);
+  await runMsg(worker,{init:true,wasmUrl});
+  await runMsg(worker,{setMulti:true,mblocks:packed.mblocks,nb:packed.nb,activeMask:packed.activeMask,anchorR:packed.rA,anchorSide:packed.sideA});
  }));
- const seconds=(performance.now()-start)/1000;return {matches,done,total,seconds,rate:done/seconds,cancelled:!!o.signal?.aborted,tuning,...(stopped?{stopped,stopReason}:{})};
+
+ const active=count;
+ tuning={workers:active,skipped:true,cached:false};
+ const limit=opts.stopOnFirst?1:(opts.maxMatches??100000);
+ await Promise.all(pool.slice(0,active).map(async worker=>{
+  for(;;){
+   if(stopped||opts.signal?.aborted)break;
+   await opts.waitIfPaused?.();
+   const task=next();if(!task)break;
+   const r=await runMsg(worker,{...task,sharedCancel});
+   const arr=new Int32Array(r.matches);
+   for(let i=0;i<arr.length;i+=4){
+    if(stopped)break;
+    const wx=arr[i],wy=arr[i+1],wz=arr[i+2],n=arr[i+3];
+    const ox=wx-packed.rotRx[n],oy=wy-packed.yA,oz=wz-packed.rotRz[n];
+    if(hasOffsetShift&&(ox<opts.xmin||ox>opts.xmax||oz<opts.zmin||oz>opts.zmax))continue;
+    const m={x:ox,y:oy,z:oz,north:n};matches.push(m);opts.onMatch?.(m);
+    if(opts.stopOnFirst||matches.length>=limit){stopped=true;stopReason=opts.stopOnFirst?'first match':'result limit';break;}
+   }
+   done=Math.min(total,done+(r.tested??0));
+   const seconds=(performance.now()-start)/1000;
+   opts.onProgress?.({done,total,seconds,rate:done/Math.max(1e-6,seconds)});
+  }
+ }));
+ if(!opts.signal?.aborted&&!stopped)done=total;
+ const seconds=(performance.now()-start)/1000;
+ return {matches,done,total,seconds,rate:done/Math.max(1e-6,seconds),cancelled:!!opts.signal?.aborted,tuning,...(stopped?{stopped,stopReason}:{})};
  }finally{pool.forEach(w=>w.terminate());o.signal?.removeEventListener('abort',cancel);running=false;}
  }};
 }

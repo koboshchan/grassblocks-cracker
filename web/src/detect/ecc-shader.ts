@@ -8,12 +8,13 @@ struct State { base:array<f32,9>, warp:array<f32,9>, rho:f32,last:f32,status:f32
 @group(0) @binding(3) var<storage,read_write> state:array<State>;
 // Patch planes raw,smoothed,referenceValue,gradientX,gradientY.
 @group(0) @binding(4) var<storage,read_write> patches:array<f32>;
-// Per-pixel warped input,referenceValue,gx,gy and mask; Jacobian eight floats.
+// Per-pixel warped input,referenceValue,gx,gy and mask; Jacobian stores compact (gx,gy,t).
 @group(0) @binding(5) var<storage,read_write> pixels:array<f32>;
 @group(0) @binding(6) var<storage,read_write> jac:array<f32>;
 // 6 statistics then 64 H,8 imageProjection,8 templateProjection.
 @group(0) @binding(7) var<storage,read_write> sums:array<f32>;
-var<workgroup> reduce:array<f32,128>;
+var<workgroup> wg_active:u32;
+var<workgroup> reduce_buf:array<vec4<f32>,832>;
 fn finite(v:f32)->bool{return abs(v)<=3.402823e38;}
 fn reflect101(x:i32)->i32 {if(x<0){return -x;}if(x>127){return 254-x;}return x;}
 fn pi(q:u32,plane:u32,x:i32,y:i32)->u32{return q*81920u+plane*16384u+u32(y)*128u+u32(x);}
@@ -22,126 +23,169 @@ fn imageSample(x:f32,y:f32)->f32{
  // OpenCV INTER_BITS=5 quantized interpolation, replicated source border.
  let sx=i32(round(x*32.0));let sy=i32(round(y*32.0));let ix=sx>>5;let iy=sy>>5;
  let a=f32(sx&31)/32.0;let b=f32(sy&31)/32.0;
- return (imageAt(ix,iy)*(1.0-a)+imageAt(ix+1,iy)*a)*(1.0-b)+(imageAt(ix,iy+1)*(1.0-a)+imageAt(ix+1,iy+1)*a)*b;
+ let top=imageAt(ix,iy);let bot=imageAt(ix,iy+1);
+ let r0=top+(imageAt(ix+1,iy)-top)*a;let r1=bot+(imageAt(ix+1,iy+1)-bot)*a;
+ return r0+(r1-r0)*b;
 }
-fn referenceValue(q:u32,x:i32,y:i32)->f32{return refs[u32(y/8)*16u+u32(x/8)][u32(state[q].rotation)]/255.0;}
+fn referenceValueRot(rot:u32,x:i32,y:i32)->f32{return refs[u32(y>>3)*16u+u32(x>>3)][rot]/255.0;}
 fn rawAt(q:u32,x:i32,y:i32)->f32{return patches[pi(q,0u,reflect101(x),reflect101(y))];}
 fn smoothed(q:u32,x:i32,y:i32,plane:u32)->f32{return patches[pi(q,plane,reflect101(x),reflect101(y))];}
 fn patchAt(q:u32,plane:u32,x:i32,y:i32)->f32{if(x<0||x>127||y<0||y>127){return 0.0;}return patches[pi(q,plane,x,y)];}
 fn patchSample(q:u32,plane:u32,x:f32,y:f32)->f32{
  let sx=i32(round(x*32.0));let sy=i32(round(y*32.0));let ix=sx>>5;let iy=sy>>5;
  let a=f32(sx&31)/32.0;let b=f32(sy&31)/32.0;
+ if(ix>=0&&ix<127&&iy>=0&&iy<127){
+  let base=q*81920u+plane*16384u+u32(iy)*128u+u32(ix);
+  let p00=patches[base];let p10=patches[base+1u];let p01=patches[base+128u];let p11=patches[base+129u];
+  let r0=p00+(p10-p00)*a;let r1=p01+(p11-p01)*a;
+  return r0+(r1-r0)*b;
+ }
  return (patchAt(q,plane,ix,iy)*(1.0-a)+patchAt(q,plane,ix+1,iy)*a)*(1.0-b)+(patchAt(q,plane,ix,iy+1)*(1.0-a)+patchAt(q,plane,ix+1,iy+1)*a)*b;
 }
 @compute @workgroup_size(64) fn prepare(@builtin(global_invocation_id) id:vec3<u32>){
- let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=f32(k%128u);let y=f32(k/128u);let b=state[q].base;
+ let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=f32(k&127u);let y=f32(k>>7u);let b=state[q].base;
  let den=b[6]*x+b[7]*y+b[8];let px=(b[0]*x+b[1]*y+b[2])/den;let py=(b[3]*x+b[4]*y+b[5])/den;
  patches[q*81920u+k]=imageSample(px,py);
 }
 @compute @workgroup_size(64) fn gaussian(@builtin(global_invocation_id) id:vec3<u32>){
- let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=i32(k%128u);let y=i32(k/128u);var a=0.0;var b=0.0;
- for(var j=-1;j<=1;j++){for(var i=-1;i<=1;i++){let weight=select(1.0,2.0,i==0)*select(1.0,2.0,j==0)/16.0;a+=rawAt(q,x+i,y+j)*weight;b+=referenceValue(q,reflect101(x+i),reflect101(y+j))*weight;}}
+ let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=i32(k&127u);let y=i32(k>>7u);let rot=u32(state[q].rotation);var a=0.0;var b=0.0;
+ for(var j=-1;j<=1;j++){let ry=reflect101(y+j);let wj=select(0.0625,0.125,j==0);for(var i=-1;i<=1;i++){let rx=reflect101(x+i);let weight=select(wj,wj*2.0,i==0);a+=patches[pi(q,0u,rx,ry)]*weight;b+=referenceValueRot(rot,rx,ry)*weight;}}
  patches[pi(q,1u,x,y)]=a;patches[pi(q,2u,x,y)]=b;
 }
 @compute @workgroup_size(64) fn gradients(@builtin(global_invocation_id) id:vec3<u32>){
- let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=i32(k%128u);let y=i32(k/128u);
+ let q=id.y;let k=id.x;if(q>=p.count||k>=16384u){return;}let x=i32(k&127u);let y=i32(k>>7u);
  patches[pi(q,3u,x,y)]=.5*(smoothed(q,x+1,y,1u)-smoothed(q,x-1,y,1u));patches[pi(q,4u,x,y)]=.5*(smoothed(q,x,y+1,1u)-smoothed(q,x,y-1,1u));
 }
 @compute @workgroup_size(64) fn warp_pixels(@builtin(global_invocation_id) id:vec3<u32>){
- let q=id.y;let k=id.x;if(q>=p.count||k>=16384u||state[q].status!=0.0){return;}let x=f32(k%128u);let y=f32(k/128u);let w=state[q].warp;
+ let q=id.y;let k=id.x;if(q>=p.count||k>=16384u||state[q].status!=0.0){return;}let x=f32(k&127u);let y=f32(k>>7u);let w=state[q].warp;
  let d=w[6]*x+w[7]*y+1.0;let u=(w[0]*x+w[1]*y+w[2])/d;let v=(w[3]*x+w[4]*y+w[5])/d;
  let valid=finite(u)&&finite(v)&&abs(d)>0.0;let nx=i32(round(u));let ny=i32(round(v));let mask=valid&&nx>=0&&nx<128&&ny>=0&&ny<128;
- let at=(q*16384u+k)*5u;pixels[at]=patchSample(q,1u,u,v);pixels[at+1u]=patches[pi(q,2u,i32(k%128u),i32(k/128u))];pixels[at+2u]=patchSample(q,3u,u,v);pixels[at+3u]=patchSample(q,4u,u,v);pixels[at+4u]=select(0.0,1.0,mask);
+ let at=(q*16384u+k)*5u;
+ if(!mask){pixels[at]=0.0;pixels[at+1u]=0.0;pixels[at+2u]=0.0;pixels[at+3u]=0.0;pixels[at+4u]=0.0;return;}
+ pixels[at]=patchSample(q,1u,u,v);pixels[at+1u]=patches[q*81920u+32768u+k];pixels[at+2u]=patchSample(q,3u,u,v);pixels[at+3u]=patchSample(q,4u,u,v);pixels[at+4u]=1.0;
 }
 @compute @workgroup_size(128) fn statistics(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
  let q=g.x;
- let is_active = q < p.count && state[q].status == 0.0;
- var s0=0.0; var s1=0.0; var s2=0.0; var s3=0.0; var s4=0.0; var s5=0.0;
- if(is_active){
-  for(var k=lane;k<16384u;k+=128u){
-   let a=(q*16384u+k)*5u;
-   let im=pixels[a];let t=pixels[a+1u];let m=pixels[a+4u];
-   s0+=m; s1+=im*m; s2+=t*m; s3+=im*im*m; s4+=t*t*m; s5+=im*t*m;
-  }
+ if(lane==0u){wg_active=select(0u,1u,q<p.count&&state[q].status==0.0);}
+ if(workgroupUniformLoad(&wg_active)==0u){return;}
+ var s0=0.0;var s1=0.0;var s2=0.0;var s3=0.0;var s4=0.0;var s5=0.0;
+ let q_base=q*81920u;
+ for(var k=lane;k<16384u;k+=128u){
+  let a=q_base+k*5u;
+  let m=pixels[a+4u];
+  if(m==0.0){continue;}
+  let im=pixels[a];let t=pixels[a+1u];
+  s0+=1.0;s1+=im;s2+=t;s3+=im*im;s4+=t*t;s5+=im*t;
  }
- var s = array<f32, 6>(s0, s1, s2, s3, s4, s5);
- for(var metric=0u; metric<6u; metric++){
-  reduce[lane]=s[metric];
-  workgroupBarrier();
-  for(var stride=64u;stride>0u;stride/=2u){
-   if(lane<stride){reduce[lane]+=reduce[lane+stride];}
-   workgroupBarrier();
+ reduce_buf[lane]=vec4<f32>(s0,s1,s2,s3);
+ reduce_buf[128u+lane]=vec4<f32>(s4,s5,0.0,0.0);
+ workgroupBarrier();
+ for(var stride=64u;stride>0u;stride/=2u){
+  if(lane<stride){
+   reduce_buf[lane]+=reduce_buf[lane+stride];
+   reduce_buf[128u+lane]+=reduce_buf[128u+lane+stride];
   }
-  if(lane==0u && is_active){sums[q*86u+metric]=reduce[0];}
+  workgroupBarrier();
+ }
+ if(lane==0u){
+  let v0=reduce_buf[0];let v1=reduce_buf[128u];
+  let o=q*86u;
+  sums[o]=v0.x;sums[o+1u]=v0.y;sums[o+2u]=v0.z;sums[o+3u]=v0.w;sums[o+4u]=v1.x;sums[o+5u]=v1.y;
  }
 }
 @compute @workgroup_size(64) fn jacobian(@builtin(global_invocation_id) id:vec3<u32>){
- let q=id.y;let k=id.x;if(q>=p.count||k>=16384u||state[q].status!=0.0){return;}let a=(q*16384u+k)*5u;let x=f32(k%128u);let y=f32(k/128u);let w=state[q].warp;let den=w[6]*x+w[7]*y+1.0;
+ let q=id.y;let k=id.x;if(q>=p.count||k>=16384u||state[q].status!=0.0){return;}
+ let a=(q*16384u+k)*5u;
+ if(pixels[a+4u]==0.0){return;}
+ let x=f32(k&127u);let y=f32(k>>7u);let w=state[q].warp;let den=w[6]*x+w[7]*y+1.0;
  let gx=pixels[a+2u]/den;let gy=pixels[a+3u]/den;let u=(w[0]*x+w[1]*y+w[2])/den;let v=(w[3]*x+w[4]*y+w[5])/den;let t= -u*gx-v*gy;
- let j=(q*16384u+k)*8u;jac[j]=gx*x;jac[j+1u]=gy*x;jac[j+2u]=t*x;jac[j+3u]=gx*y;jac[j+4u]=gy*y;jac[j+5u]=t*y;jac[j+6u]=gx;jac[j+7u]=gy;
- // OpenCV subtract(image,mean,image,mask) leaves unmasked image pixels intact.
+ let j=(q*16384u+k)*3u;jac[j]=gx;jac[j+1u]=gy;jac[j+2u]=t;
  let n=sums[q*86u];let mi=sums[q*86u+1u]/n;let mt=sums[q*86u+2u]/n;
- pixels[a]=pixels[a]-mi*pixels[a+4u];pixels[a+1u]=(pixels[a+1u]-mt)*pixels[a+4u];
+ pixels[a]=pixels[a]-mi;pixels[a+1u]=pixels[a+1u]-mt;
 }
 @compute @workgroup_size(128) fn normal_equations(@builtin(workgroup_id) g:vec3<u32>,@builtin(local_invocation_index) lane:u32){
  let q=g.x;
- let is_active = q < p.count && state[q].status == 0.0;
- var h: array<f32, 52>;
- if(is_active){
-  for(var k=lane;k<16384u;k+=128u){
-   let j=(q*16384u+k)*8u;let a=(q*16384u+k)*5u;
-   let j0=jac[j]; let j1=jac[j+1u]; let j2=jac[j+2u]; let j3=jac[j+3u];
-   let j4=jac[j+4u]; let j5=jac[j+5u]; let j6=jac[j+6u]; let j7=jac[j+7u];
-   let jv = array<f32, 8>(j0, j1, j2, j3, j4, j5, j6, j7);
-   let p0=pixels[a]; let p1=pixels[a+1u];
-   var idx = 0u;
-   for(var r=0u; r<8u; r++){
-    for(var c=r; c<8u; c++){
-     h[idx] += jv[r] * jv[c];
-     idx++;
-    }
-   }
-   for(var r=0u; r<8u; r++){
-    h[36u + r] += jv[r] * p0;
-    h[44u + r] += jv[r] * p1;
-   }
-  }
+ if(lane==0u){wg_active=select(0u,1u,q<p.count&&state[q].status==0.0);}
+ if(workgroupUniformLoad(&wg_active)==0u){return;}
+ var h0=vec4<f32>(0.0);var h1=vec4<f32>(0.0);var h2=vec4<f32>(0.0);var h3=vec4<f32>(0.0);
+ var h4=vec4<f32>(0.0);var h5=vec4<f32>(0.0);var h6=vec4<f32>(0.0);var h7=vec4<f32>(0.0);
+ var h8=vec4<f32>(0.0);var h9=vec4<f32>(0.0);var h10=vec4<f32>(0.0);var h11=vec4<f32>(0.0);
+ var h12=vec4<f32>(0.0);
+ let x=f32(lane);
+ let pix_base=q*81920u;
+ let jac_base=q*49152u;
+ for(var k=lane;k<16384u;k+=128u){
+  let a=pix_base+k*5u;
+  if(pixels[a+4u]==0.0){continue;}
+  let p0=pixels[a];let p1=pixels[a+1u];
+  let jb=jac_base+k*3u;
+  let gx=jac[jb];let gy=jac[jb+1u];let t=jac[jb+2u];
+  if(gx==0.0&&gy==0.0&&p0==0.0&&p1==0.0){continue;}
+  let y=f32(k>>7u);
+  let j0=gx*x;let j1=gy*x;let j2=t*x;
+  let j3=gx*y;let j4=gy*y;let j5=t*y;
+  let j6=gx;let j7=gy;
+  let jv0=vec4<f32>(j0,j1,j2,j3);
+  let jv1=vec4<f32>(j4,j5,j6,j7);
+  h0+=j0*jv0;
+  h1+=j0*jv1;
+  h2+=j1*vec4<f32>(j1,j2,j3,j4);
+  h3+=vec4<f32>(j1*j5,j1*j6,j1*j7,j2*j2);
+  h4+=j2*vec4<f32>(j3,j4,j5,j6);
+  h5+=vec4<f32>(j2*j7,j3*j3,j3*j4,j3*j5);
+  h6+=vec4<f32>(j3*j6,j3*j7,j4*j4,j4*j5);
+  h7+=vec4<f32>(j4*j6,j4*j7,j5*j5,j5*j6);
+  h8+=vec4<f32>(j5*j7,j6*j6,j6*j7,j7*j7);
+  h9+=p0*jv0;
+  h10+=p0*jv1;
+  h11+=p1*jv0;
+  h12+=p1*jv1;
  }
- let o = q * 86u + 6u;
- var idx = 0u;
- for(var r=0u; r<8u; r++){
-  for(var c=r; c<8u; c++){
-   reduce[lane] = h[idx];
-   workgroupBarrier();
-   for(var stride=64u; stride>0u; stride/=2u){
-    if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
-    workgroupBarrier();
-   }
-   if(lane == 0u && is_active){
-    let val = reduce[0];
-    sums[o + r * 8u + c] = val;
-    sums[o + c * 8u + r] = val;
-   }
-   idx++;
-  }
+ if(lane>=64u){
+  let b=(lane-64u)*13u;
+  reduce_buf[b+0u]=h0;reduce_buf[b+1u]=h1;reduce_buf[b+2u]=h2;reduce_buf[b+3u]=h3;
+  reduce_buf[b+4u]=h4;reduce_buf[b+5u]=h5;reduce_buf[b+6u]=h6;reduce_buf[b+7u]=h7;
+  reduce_buf[b+8u]=h8;reduce_buf[b+9u]=h9;reduce_buf[b+10u]=h10;reduce_buf[b+11u]=h11;
+  reduce_buf[b+12u]=h12;
  }
- for(var r=0u; r<8u; r++){
-  reduce[lane] = h[36u + r];
+ workgroupBarrier();
+ if(lane<64u){
+  let b=lane*13u;
+  reduce_buf[b+0u]=h0+reduce_buf[b+0u];reduce_buf[b+1u]=h1+reduce_buf[b+1u];
+  reduce_buf[b+2u]=h2+reduce_buf[b+2u];reduce_buf[b+3u]=h3+reduce_buf[b+3u];
+  reduce_buf[b+4u]=h4+reduce_buf[b+4u];reduce_buf[b+5u]=h5+reduce_buf[b+5u];
+  reduce_buf[b+6u]=h6+reduce_buf[b+6u];reduce_buf[b+7u]=h7+reduce_buf[b+7u];
+  reduce_buf[b+8u]=h8+reduce_buf[b+8u];reduce_buf[b+9u]=h9+reduce_buf[b+9u];
+  reduce_buf[b+10u]=h10+reduce_buf[b+10u];reduce_buf[b+11u]=h11+reduce_buf[b+11u];
+  reduce_buf[b+12u]=h12+reduce_buf[b+12u];
+ }
+ workgroupBarrier();
+ for(var stride=32u;stride>0u;stride/=2u){
+  let total=stride*13u;
+  for(var idx=lane;idx<total;idx+=128u){
+   reduce_buf[idx]+=reduce_buf[idx+total];
+  }
   workgroupBarrier();
-  for(var stride=64u; stride>0u; stride/=2u){
-   if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
-   workgroupBarrier();
-  }
-  if(lane == 0u && is_active){ sums[o + 64u + r] = reduce[0]; }
  }
- for(var r=0u; r<8u; r++){
-  reduce[lane] = h[44u + r];
-  workgroupBarrier();
-  for(var stride=64u; stride>0u; stride/=2u){
-   if(lane < stride){ reduce[lane] += reduce[lane + stride]; }
-   workgroupBarrier();
-  }
-  if(lane == 0u && is_active){ sums[o + 72u + r] = reduce[0]; }
+ if(lane==0u){
+  let r0=reduce_buf[0u];let r1=reduce_buf[1u];let r2=reduce_buf[2u];let r3=reduce_buf[3u];
+  let r4=reduce_buf[4u];let r5=reduce_buf[5u];let r6=reduce_buf[6u];let r7=reduce_buf[7u];
+  let r8=reduce_buf[8u];let r9=reduce_buf[9u];let r10=reduce_buf[10u];let r11=reduce_buf[11u];
+  let r12=reduce_buf[12u];
+  let o=q*86u+6u;
+  sums[o+0u]=r0.x;sums[o+1u]=r0.y;sums[o+8u]=r0.y;sums[o+2u]=r0.z;sums[o+16u]=r0.z;sums[o+3u]=r0.w;sums[o+24u]=r0.w;
+  sums[o+4u]=r1.x;sums[o+32u]=r1.x;sums[o+5u]=r1.y;sums[o+40u]=r1.y;sums[o+6u]=r1.z;sums[o+48u]=r1.z;sums[o+7u]=r1.w;sums[o+56u]=r1.w;
+  sums[o+9u]=r2.x;sums[o+10u]=r2.y;sums[o+17u]=r2.y;sums[o+11u]=r2.z;sums[o+25u]=r2.z;sums[o+12u]=r2.w;sums[o+33u]=r2.w;
+  sums[o+13u]=r3.x;sums[o+41u]=r3.x;sums[o+14u]=r3.y;sums[o+49u]=r3.y;sums[o+15u]=r3.z;sums[o+57u]=r3.z;sums[o+18u]=r3.w;
+  sums[o+19u]=r4.x;sums[o+26u]=r4.x;sums[o+20u]=r4.y;sums[o+34u]=r4.y;sums[o+21u]=r4.z;sums[o+42u]=r4.z;sums[o+22u]=r4.w;sums[o+50u]=r4.w;
+  sums[o+23u]=r5.x;sums[o+58u]=r5.x;sums[o+27u]=r5.y;sums[o+28u]=r5.z;sums[o+35u]=r5.z;sums[o+29u]=r5.w;sums[o+43u]=r5.w;
+  sums[o+30u]=r6.x;sums[o+51u]=r6.x;sums[o+31u]=r6.y;sums[o+59u]=r6.y;sums[o+36u]=r6.z;sums[o+37u]=r6.w;sums[o+44u]=r6.w;
+  sums[o+38u]=r7.x;sums[o+52u]=r7.x;sums[o+39u]=r7.y;sums[o+60u]=r7.y;sums[o+45u]=r7.z;sums[o+46u]=r7.w;sums[o+53u]=r7.w;
+  sums[o+47u]=r8.x;sums[o+61u]=r8.x;sums[o+54u]=r8.y;sums[o+55u]=r8.z;sums[o+62u]=r8.z;sums[o+63u]=r8.w;
+  sums[o+64u]=r9.x;sums[o+65u]=r9.y;sums[o+66u]=r9.z;sums[o+67u]=r9.w;
+  sums[o+68u]=r10.x;sums[o+69u]=r10.y;sums[o+70u]=r10.z;sums[o+71u]=r10.w;
+  sums[o+72u]=r11.x;sums[o+73u]=r11.y;sums[o+74u]=r11.z;sums[o+75u]=r11.w;
+  sums[o+76u]=r12.x;sums[o+77u]=r12.y;sums[o+78u]=r12.z;sums[o+79u]=r12.w;
  }
 }
 @compute @workgroup_size(1) fn update(@builtin(global_invocation_id) id:vec3<u32>){
@@ -158,7 +202,7 @@ fn patchSample(q:u32,plane:u32,x:f32,y:f32)->f32{
  var hi:array<f32,8>;var dotI=0.0;var dotT=0.0;
  for(var r=0u;r<8u;r++){for(var c=0u;c<8u;c++){hi[r]+=a[r*16u+c+8u]*sums[o+70u+c];}dotI+=sums[o+70u+r]*hi[r];dotT+=sums[o+78u+r]*hi[r];}
  let ld=corr-dotT;let lambda=(vi-dotI)/ld;if(ld<=0.0||!finite(lambda)){state[q].status=-3.0;return;}
- var delta:array<f32,8>;for(var r=0u;r<8u;r++){for(var c=0u;c<8u;c++){delta[r]+=a[r*16u+c+8u]*(lambda*sums[o+78u+c]-sums[o+70u+c]);}if(!finite(delta[r])){state[q].status=-1.0;return;}}
+ var delta:array<f32,8>;for(var r=0u;r<8u;r++){var ht=0.0;for(var c=0u;c<8u;c++){ht+=a[r*16u+c+8u]*sums[o+78u+c];}delta[r]=lambda*ht-hi[r];if(!finite(delta[r])){state[q].status=-1.0;return;}}
  let order=array<u32,8>(0u,3u,6u,1u,4u,7u,2u,5u);for(var r=0u;r<8u;r++){state[q].warp[order[r]]+=delta[r];}
  state[q].iterations+=1.0;state[q].last=state[q].rho;state[q].rho=rho;
  if(state[q].iterations>=15.0&&rho<0.65){state[q].status=-1.0;return;}
