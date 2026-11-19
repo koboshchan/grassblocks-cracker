@@ -22,7 +22,8 @@ Point applyH(const H3&H,double x,double y);
 bool inv3(const H3&m,H3&o);
 Verdict classify(const Context&ctx,const Quad&q);
 std::vector<Verdict> classifyBatchNative(const Context&ctx,const std::vector<Quad>&qs);
-Result runDetection(Context&ctx,const std::vector<Quad>&raw,bool manual,Timings&t);
+Refiner makeEccRefiner(const Context&ctx);
+Result runDetection(Context&ctx,const std::vector<Quad>&raw,bool manual,Timings&t,const Refiner*sharedRefine=nullptr);
 std::vector<Block>mergeAligned(const std::vector<Block>&original,const std::vector<Block>&incoming);
 double clockMs();
 }

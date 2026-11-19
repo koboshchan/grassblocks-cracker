@@ -1,4 +1,7 @@
 export type DetectorBackend = 'auto' | 'wasm' | 'webgpu';
-/// 'auto' uses WebGPU when an adapter initializes and silently falls back to WASM otherwise.
-/// 'webgpu' is strict (errors if unavailable); anything unknown or missing means 'wasm'.
+/**
+ * Normalize detector backend choice. WASM is the main detection backend;
+ * 'webgpu' and 'auto' (which tries deprecated WebGPU/WGSL detection before falling back to WASM)
+ * are deprecated and kept for compatibility/testing only.
+ */
 export function normalizeBackend(value: unknown): DetectorBackend { return value === 'webgpu' ? 'webgpu' : value === 'auto' ? 'auto' : 'wasm'; }

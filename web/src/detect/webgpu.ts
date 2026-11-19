@@ -1,6 +1,7 @@
 import {eccScratchBudget,withEccAllocationRetry,eccThroughputPolicy,runEccWindow} from './ecc-batch';
 import {BatchedGpuEcc} from './ecc';
 /**
+ * @deprecated WebGPU/WGSL image-to-formation detection is deprecated in favor of the CPU WASM pipeline.
  * WebGPU implementation of the dense patch detector kernel.
  */
 

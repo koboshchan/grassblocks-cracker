@@ -2,7 +2,8 @@ import type {FBlock} from './formation';
 
 export const RANGES = [2000, 10000, 100000] as const;
 export const DEFAULT_RANGE = 10000;
-export const DETECT_BACKEND = 'auto';
+// WASM is the primary image-to-formation detection backend; WebGPU/WGSL detection is deprecated.
+export const DETECT_BACKEND = 'wasm';
 
 export type Bounds = {xmin: number; xmax: number; ymin: number; ymax: number; zmin: number; zmax: number};
 export type StartResult = {status: 'done' | 'cancelled' | 'nofaces' | 'noquad' | 'noblocks' | 'error'; stage: 'detect' | 'search' | 'idle'; blocks: FBlock[]; result?: any; message?: string};

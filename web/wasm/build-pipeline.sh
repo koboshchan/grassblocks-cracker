@@ -31,7 +31,7 @@ if [ "$MODE" != link ]; then
     -DCMAKE_CXX_FLAGS="-O3 -ffp-contract=off -fexceptions" \
     -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG" \
     -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
-    -DBUILD_LIST=core,imgproc,features2d,flann,calib3d \
+    -DBUILD_LIST=core,imgproc,features2d,flann,calib3d,video \
     -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
     -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_opencv_js=OFF \
     -DBUILD_opencv_dnn=OFF -DBUILD_opencv_python2=OFF -DBUILD_opencv_python3=OFF \
@@ -58,12 +58,12 @@ emcc -c -O3 -msimd128 -ffp-contract=off -fno-builtin -Dmemset=grass_dense_memset
   "$WEB_DIR/detect-wasm.c" -o "$OBJECTS/dense.o"
 for unit in sift vlfeat/vl/sift vlfeat/vl/imopv vlfeat/vl/mathop vlfeat/vl/generic vlfeat/vl/host vlfeat/vl/random; do
   name=$(printf '%s' "$unit" | tr / _)
-  emcc -c -O3 -ffp-contract=off -DVL_DISABLE_SSE2 -DVL_DISABLE_AVX \
+  emcc -c -O3 -msimd128 -ffp-contract=off -DVL_DISABLE_SSE2 -DVL_DISABLE_AVX \
     -DVL_DISABLE_THREADS -I"$WEB_DIR/wasm/vlfeat" \
     "$WEB_DIR/wasm/$unit.c" -o "$OBJECTS/$name.o"
 done
 for unit in pipeline geometry features; do
-  em++ -c -std=c++17 -O3 -ffp-contract=off -fexceptions \
+  em++ -c -std=c++17 -O3 -msimd128 -ffp-contract=off -fexceptions \
     -I"$PREFIX/include/opencv4" -I"$WEB_DIR/wasm" \
     "$WEB_DIR/wasm/$unit.cpp" -o "$OBJECTS/$unit.o"
 done
@@ -81,5 +81,5 @@ em++ -O3 -msimd128 -ffp-contract=off \
   -s DISABLE_EXCEPTION_CATCHING=0 -s FILESYSTEM=0 \
   -s MODULARIZE=1 -s EXPORT_NAME=GrassPipeline \
   -s ENVIRONMENT=web,worker,node -s EXPORTED_FUNCTIONS="$EXPORTS" \
-  -s EXPORTED_RUNTIME_METHODS='["UTF8ToString"]' \
+  -s EXPORTED_RUNTIME_METHODS='["UTF8ToString","HEAPU8","HEAPF32","HEAPF64"]' \
   -o "$WEB_DIR/public/vendor/grass-pipeline.js"

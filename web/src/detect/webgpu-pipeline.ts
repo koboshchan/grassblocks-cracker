@@ -1,3 +1,6 @@
+/**
+ * @deprecated WebGPU/WGSL detection pipeline is deprecated; WASM (pipeline.ts / wasm-pool.ts) is the main detector.
+ */
 import {GPU_TRIALS,mergeGpuAligned,topDownSizes} from './gpu-trials';
 import { WebGpuDetector } from './webgpu';
 

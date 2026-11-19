@@ -17,12 +17,12 @@ test('default range is 10K and ranges are the literal values',()=>{
  assert.equal(normalizeRange('bogus'),10000);assert.equal(normalizeRange(-5),10000);assert.equal(normalizeRange('100000'),100000);
  assert.deepEqual(rangeBounds(2000,{ymin:-64,ymax:320}),{xmin:-2000,xmax:2000,ymin:-64,ymax:320,zmin:-2000,zmax:2000});
 });
-test('auto START detects with backend auto, then searches detected rows with selected range and unchanged y',async()=>{
+test('auto START detects with backend wasm, then searches detected rows with selected range and unchanged y',async()=>{
  const h=harness();
  const r=await runStart(base(h,{range:100000}));
  assert.equal(r.status,'done');
  assert.deepEqual(h.calls.map(c=>c[0]),['stage','detect','stage','search']);
- assert.equal(h.calls[1][1].backend,'auto');assert.equal(h.calls[1][1].seeds,undefined);
+ assert.equal(h.calls[1][1].backend,'wasm');assert.equal(h.calls[1][1].seeds,undefined);
  assert.deepEqual(h.calls[3][1].map((b:any)=>b.x),[1,2]);
  assert.deepEqual(h.calls[3][2],{xmin:-100000,xmax:100000,ymin:-64,ymax:320,zmin:-100000,zmax:100000});
 });

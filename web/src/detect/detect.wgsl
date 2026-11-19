@@ -1,3 +1,4 @@
+// @deprecated WebGPU/WGSL image-to-formation detection shader is deprecated; WASM is the main detector.
 struct Params {
     width: u32,
     height: u32,

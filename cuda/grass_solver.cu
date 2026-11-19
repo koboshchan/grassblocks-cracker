@@ -99,69 +99,6 @@ __device__ __forceinline__ PackedBlock load_packed_global(const PackedBlock* __r
   return PackedBlock{v.x, v.y, v.z, uint32_t(v.w)};
 }
 
-__device__ __forceinline__ uint64_t rotation_xz_u64(int32_t x, int32_t z) {
-  uint32_t xp = uint32_t(x) * 3129871u;
-  uint64_t sx = uint64_t(int64_t(int32_t(xp)));
-  return sx ^ (uint64_t(int64_t(z)) * 116129781ULL);
-}
-
-__device__ __forceinline__ int rotation_y_u64(uint64_t xz, int32_t y) {
-  uint64_t l = xz ^ uint64_t(int64_t(y));
-  l = l * l * 42317861ULL + l * 11ULL;
-  uint64_t seed = (l >> 16) ^ 0x5DEECE66DULL;
-  return int(((seed * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-}
-
-__device__ __forceinline__ void rotation_y4_u64(uint64_t xz, int32_t base_y,
-                                                int& r0, int& r1, int& r2, int& r3) {
-  uint64_t l0 = xz ^ uint64_t(int64_t(base_y));
-  uint64_t l1 = xz ^ uint64_t(int64_t(base_y + 1));
-  uint64_t l2 = xz ^ uint64_t(int64_t(base_y + 2));
-  uint64_t l3 = xz ^ uint64_t(int64_t(base_y + 3));
-  l0 = l0 * l0 * 42317861ULL + l0 * 11ULL;
-  l1 = l1 * l1 * 42317861ULL + l1 * 11ULL;
-  l2 = l2 * l2 * 42317861ULL + l2 * 11ULL;
-  l3 = l3 * l3 * 42317861ULL + l3 * 11ULL;
-  uint64_t s0 = (l0 >> 16) ^ 0x5DEECE66DULL;
-  uint64_t s1 = (l1 >> 16) ^ 0x5DEECE66DULL;
-  uint64_t s2 = (l2 >> 16) ^ 0x5DEECE66DULL;
-  uint64_t s3 = (l3 >> 16) ^ 0x5DEECE66DULL;
-  r0 = int(((s0 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-  r1 = int(((s1 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-  r2 = int(((s2 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-  r3 = int(((s3 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-}
-
-__device__ __forceinline__ void rotation_y2_u64(uint64_t xz, int32_t base_y, int& r0, int& r1) {
-  uint64_t l0 = xz ^ uint64_t(int64_t(base_y));
-  uint64_t l1 = xz ^ uint64_t(int64_t(base_y + 1));
-  l0 = l0 * l0 * 42317861ULL + l0 * 11ULL;
-  l1 = l1 * l1 * 42317861ULL + l1 * 11ULL;
-  uint64_t s0 = (l0 >> 16) ^ 0x5DEECE66DULL;
-  uint64_t s1 = (l1 >> 16) ^ 0x5DEECE66DULL;
-  r0 = int(((s0 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-  r1 = int(((s1 * 0x5DEECE66DULL + 11ULL) >> 46) & 3ULL);
-}
-
-__device__ __forceinline__ bool check_multi_const(const PackedBlock* __restrict__ blocks,
-                                                  uint32_t nb, int north,
-                                                  int32_t x, int32_t y, int32_t z, uint64_t xz1) {
-  if (nb > 1u) {
-    PackedBlock b1 = load_packed_global(blocks, north, 1u, nb);
-    uint32_t r1 = uint32_t(rotation_y_u64(xz1, int32_t(add_i32_wrap(y, b1.y))));
-    if ((r1 & (b1.meta >> 8u)) != (b1.meta & 3u)) return false;
-    #pragma unroll
-    for (uint32_t i = 2u; i < nb; i++) {
-      PackedBlock b = load_packed_global(blocks, north, i, nb);
-      uint32_t r = uint32_t(rotation_y_u64(
-          rotation_xz_u64(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z))),
-          int32_t(add_i32_wrap(y, b.y))));
-      if ((r & (b.meta >> 8u)) != (b.meta & 3u)) return false;
-    }
-  }
-  return true;
-}
-
 static constexpr uint32_t SHARED_CAP = 64u;
 
 struct B12RegsSingle {
@@ -173,16 +110,23 @@ struct B12RegsSingle {
   uint32_t b2_meta;
 };
 
-// Unused multi-north shared-mem helpers removed in favor of 40-register 100%-occupancy path.
+__device__ __forceinline__ void select_xz1_u32(
+    int n,
+    uint32_t x0l, uint32_t x0h, uint32_t x1l, uint32_t x1h,
+    uint32_t x2l, uint32_t x2h, uint32_t x3l, uint32_t x3h,
+    uint32_t& out_lo, uint32_t& out_hi) {
+  out_lo = (n == 0) ? x0l : (n == 1) ? x1l : (n == 2) ? x2l : x3l;
+  out_hi = (n == 0) ? x0h : (n == 1) ? x1h : (n == 2) ? x2h : x3h;
+}
 
-__device__ __forceinline__ bool check_tail_shared(const PackedBlock (*s_blocks)[SHARED_CAP],
+__device__ __forceinline__ bool check_tail_shared(const PackedBlock* s_row,
                                                   const PackedBlock* __restrict__ blocks,
                                                   uint32_t start_i, uint32_t nb, int north,
                                                   int32_t x, int32_t y, int32_t z) {
   uint32_t s_end = nb < SHARED_CAP ? nb : SHARED_CAP;
-  #pragma unroll 4
+  #pragma unroll 1
   for (uint32_t i = start_i; i < s_end; i++) {
-    PackedBlock b = s_blocks[north][i];
+    PackedBlock b = s_row[i];
     uint32_t xz_lo, xz_hi;
     rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz_lo, xz_hi);
     uint32_t r = uint32_t(rotation_y_u32(xz_lo, xz_hi, int32_t(add_i32_wrap(y, b.y))));
@@ -198,7 +142,7 @@ __device__ __forceinline__ bool check_tail_shared(const PackedBlock (*s_blocks)[
   return true;
 }
 
-__device__ __forceinline__ bool check_single(const PackedBlock (*s_blocks)[SHARED_CAP],
+__device__ __forceinline__ bool check_single(const PackedBlock* s_row,
                                              const PackedBlock* __restrict__ blocks,
                                              uint32_t nb, int single_n,
                                              int32_t x, int32_t y, int32_t z,
@@ -210,7 +154,7 @@ __device__ __forceinline__ bool check_single(const PackedBlock (*s_blocks)[SHARE
       uint32_t r2 = uint32_t(rotation_y_u32(regs.xz2_lo, regs.xz2_hi, int32_t(add_i32_wrap(y, regs.b2_y))));
       if ((r2 & (regs.b2_meta >> 8u)) != (regs.b2_meta & 3u)) return false;
       if (nb > 3u) {
-        return check_tail_shared(s_blocks, blocks, 3u, nb, single_n, x, y, z);
+        return check_tail_shared(s_row, blocks, 3u, nb, single_n, x, y, z);
       }
     }
   }
@@ -223,7 +167,7 @@ __device__ __forceinline__ void sweep_segment_single(
     uint32_t xz0_lo, uint32_t K1, uint32_t K0,
     int32_t x, int32_t ymin, int32_t z,
     uint32_t task_base_idx, int single_n, int target_r0,
-    const PackedBlock (*s_blocks)[SHARED_CAP],
+    const PackedBlock* s_row,
     const PackedBlock* __restrict__ blocks, uint32_t nb,
     const B12RegsSingle& regs,
     uint32_t* results, uint32_t* result_count) {
@@ -236,35 +180,111 @@ __device__ __forceinline__ void sweep_segment_single(
     bool m1 = AnchorSide ? ((r1 & 1) == target_r0) : (r1 == target_r0);
     bool m2 = AnchorSide ? ((r2 & 1) == target_r0) : (r2 == target_r0);
     bool m3 = AnchorSide ? ((r3 & 1) == target_r0) : (r3 == target_r0);
-    if (!m0 && !m1 && !m2 && !m3) continue;
-
-    if (m0 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy);
-    if (m1 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u + 1u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + 1u);
-    if (m2 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u + 2u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + 2u);
-    if (m3 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u + 3u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + 3u);
-  }
-  for (; yy + 1u < seg_end; yy += 2u) {
-    uint32_t y0_u = uint32_t(ymin) + yy;
-    int r0, r1;
-    rotation_y2_lh(xz0_lo, K1, K0, y0_u, r0, r1);
-    bool m0 = AnchorSide ? ((r0 & 1) == target_r0) : (r0 == target_r0);
-    bool m1 = AnchorSide ? ((r1 & 1) == target_r0) : (r1 == target_r0);
-    if (!m0 && !m1) continue;
-    if (m0 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy);
-    if (m1 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u + 1u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + 1u);
+    uint32_t hits = (m0 ? 1u : 0u) | (m1 ? 2u : 0u) | (m2 ? 4u : 0u) | (m3 ? 8u : 0u);
+    while (hits) {
+      uint32_t k = uint32_t(__ffs(int(hits)) - 1);
+      hits &= hits - 1u;
+      if (check_single(s_row, blocks, nb, single_n, x, int32_t(y0_u + k), z, regs))
+        results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + k);
+    }
   }
   for (; yy < seg_end; yy++) {
     uint32_t y0_u = uint32_t(ymin) + yy;
     int r0 = rotation_y_lh(xz0_lo, K1, K0, y0_u);
     bool m0 = AnchorSide ? ((r0 & 1) == target_r0) : (r0 == target_r0);
-    if (m0 && check_single(s_blocks, blocks, nb, single_n, x, int32_t(y0_u), z, regs))
+    if (m0 && check_single(s_row, blocks, nb, single_n, x, int32_t(y0_u), z, regs))
       results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy);
+  }
+}
+
+__device__ __forceinline__ bool check_multi_hit(
+    const PackedBlock (*s_blocks)[SHARED_CAP],
+    const PackedBlock* __restrict__ blocks, uint32_t nb,
+    int n, int32_t x, int32_t y, int32_t z,
+    uint32_t xz1_lo0, uint32_t xz1_hi0, uint32_t xz1_lo1, uint32_t xz1_hi1,
+    uint32_t xz1_lo2, uint32_t xz1_hi2, uint32_t xz1_lo3, uint32_t xz1_hi3,
+    int32_t b1_y, uint32_t b1_r_pack, uint32_t b1_mask) {
+  if (nb > 1u) {
+    uint32_t xl, xh;
+    select_xz1_u32(n, xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3, xl, xh);
+    uint32_t r1 = uint32_t(rotation_y_u32(xl, xh, int32_t(add_i32_wrap(y, b1_y))));
+    uint32_t exp_r1 = (b1_r_pack >> (uint32_t(n) * 2u)) & 3u;
+    if ((r1 & b1_mask) != exp_r1) return false;
+    if (nb > 2u) {
+      return check_tail_shared(s_blocks[n], blocks, 2u, nb, n, x, y, z);
+    }
+  }
+  return true;
+}
+
+template <bool AnchorSide, bool AllFour>
+__device__ __forceinline__ void sweep_segment_multi(
+    uint32_t seg_begin, uint32_t seg_end,
+    uint32_t xz0_lo, uint32_t K1, uint32_t K0,
+    int32_t x, int32_t ymin, int32_t z,
+    uint32_t task_base_idx, uint32_t north_mask, int32_t rA,
+    const PackedBlock (*s_blocks)[SHARED_CAP],
+    const PackedBlock* __restrict__ blocks, uint32_t nb,
+    uint32_t xz1_lo0, uint32_t xz1_hi0, uint32_t xz1_lo1, uint32_t xz1_hi1,
+    uint32_t xz1_lo2, uint32_t xz1_hi2, uint32_t xz1_lo3, uint32_t xz1_hi3,
+    int32_t b1_y, uint32_t b1_r_pack, uint32_t b1_mask,
+    uint32_t* results, uint32_t* result_count) {
+  constexpr uint32_t bit_pat = AnchorSide ? 5u : 1u;
+  uint32_t yy = seg_begin;
+  for (; yy + 3u < seg_end; yy += 4u) {
+    uint32_t y0_u = uint32_t(ymin) + yy;
+    int r[4];
+    rotation_y4_lh(xz0_lo, K1, K0, y0_u, r[0], r[1], r[2], r[3]);
+    int n0 = AnchorSide ? ((r[0] - (rA & 1)) & 1) : ((r[0] - rA) & 3);
+    int n1 = AnchorSide ? ((r[1] - (rA & 1)) & 1) : ((r[1] - rA) & 3);
+    int n2 = AnchorSide ? ((r[2] - (rA & 1)) & 1) : ((r[2] - rA) & 3);
+    int n3 = AnchorSide ? ((r[3] - (rA & 1)) & 1) : ((r[3] - rA) & 3);
+    uint32_t hits = 0xFu;
+    if constexpr (!AllFour) {
+      bool m0 = (north_mask & (bit_pat << n0)) != 0u;
+      bool m1 = (north_mask & (bit_pat << n1)) != 0u;
+      bool m2 = (north_mask & (bit_pat << n2)) != 0u;
+      bool m3 = (north_mask & (bit_pat << n3)) != 0u;
+      hits = (m0 ? 1u : 0u) | (m1 ? 2u : 0u) | (m2 ? 4u : 0u) | (m3 ? 8u : 0u);
+      if (!hits) continue;
+    }
+    int ns[4] = {n0, n1, n2, n3};
+    #pragma unroll
+    for (uint32_t k = 0; k < 4u; k++) {
+      if (!AllFour && ((hits & (1u << k)) == 0u)) continue;
+      int nk = ns[k];
+      int32_t yk = int32_t(y0_u + k);
+      if ((AllFour || (north_mask & (1u << nk))) &&
+          check_multi_hit(s_blocks, blocks, nb, nk, x, yk, z,
+                          xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+                          b1_y, b1_r_pack, b1_mask)) {
+        results[atomicAdd(result_count, 1u)] = (uint32_t(nk) << 30u) | (task_base_idx + yy + k);
+      }
+      if (AnchorSide && (AllFour || (north_mask & (1u << (nk + 2)))) &&
+          check_multi_hit(s_blocks, blocks, nb, nk + 2, x, yk, z,
+                          xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+                          b1_y, b1_r_pack, b1_mask)) {
+        results[atomicAdd(result_count, 1u)] = (uint32_t(nk + 2) << 30u) | (task_base_idx + yy + k);
+      }
+    }
+  }
+  for (; yy < seg_end; yy++) {
+    uint32_t y0_u = uint32_t(ymin) + yy;
+    int r0 = rotation_y_lh(xz0_lo, K1, K0, y0_u);
+    int nk = AnchorSide ? ((r0 - (rA & 1)) & 1) : ((r0 - rA) & 3);
+    int32_t yk = int32_t(y0_u);
+    if ((AllFour || (north_mask & (1u << nk))) &&
+        check_multi_hit(s_blocks, blocks, nb, nk, x, yk, z,
+                        xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+                        b1_y, b1_r_pack, b1_mask)) {
+      results[atomicAdd(result_count, 1u)] = (uint32_t(nk) << 30u) | (task_base_idx + yy);
+    }
+    if (AnchorSide && (AllFour || (north_mask & (1u << (nk + 2)))) &&
+        check_multi_hit(s_blocks, blocks, nb, nk + 2, x, yk, z,
+                        xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+                        b1_y, b1_r_pack, b1_mask)) {
+      results[atomicAdd(result_count, 1u)] = (uint32_t(nk + 2) << 30u) | (task_base_idx + yy);
+    }
   }
 }
 
@@ -277,16 +297,23 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
     uint32_t ny, uint32_t nz, uint32_t nz_inv,
     uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase,
     uint32_t north_mask, int32_t rA, int single_n, uint32_t zero_yy) {
-  __shared__ PackedBlock s_blocks[Mode == 0 ? 4 : 1][Mode == 0 ? SHARED_CAP : 1];
+  __shared__ PackedBlock s_blocks[Mode == 0 ? 1 : 4][SHARED_CAP];
+  constexpr bool AllFour = (Mode == 2);
+  uint32_t s_nb = nb < SHARED_CAP ? nb : SHARED_CAP;
   if constexpr (Mode == 0) {
-    uint32_t s_nb = nb < SHARED_CAP ? nb : SHARED_CAP;
-    for (uint32_t idx = threadIdx.x; idx < SHARED_CAP; idx += blockDim.x) {
-      if (idx < s_nb) {
-        s_blocks[single_n][idx] = load_packed_global(blocks, single_n, idx, nb);
+    for (uint32_t idx = threadIdx.x; idx < s_nb; idx += blockDim.x) {
+      s_blocks[0][idx] = load_packed_global(blocks, single_n, idx, nb);
+    }
+  } else {
+    for (int n = 0; n < 4; n++) {
+      if (AllFour || (north_mask & (1u << n))) {
+        for (uint32_t idx = threadIdx.x; idx < s_nb; idx += blockDim.x) {
+          s_blocks[n][idx] = load_packed_global(blocks, n, idx, nb);
+        }
       }
     }
-    __syncthreads();
   }
+  __syncthreads();
 
   const uint32_t items = FixedItems ? FixedItems : runtime_items;
   uint32_t first = (blockIdx.x * blockDim.x + threadIdx.x) * items;
@@ -303,8 +330,6 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
   int32_t x = int32_t(uint32_t(xbase) + q);
 
   const int target_r0 = AnchorSide ? ((rA + single_n) & 1) : ((rA + single_n) & 3);
-  constexpr uint32_t bit_pat = AnchorSide ? 5u : 1u;
-  constexpr bool AllFour = (Mode == 2);
 
   #pragma unroll 1
   for (uint32_t j = 0; j < items; j++) {
@@ -316,24 +341,34 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
     uint32_t end = rem < ny ? rem : ny;
     uint32_t task_base_idx = task * ny - yoff;
 
-    if constexpr (Mode == 0) {
-      uint32_t xz0_lo, xz0_hi;
-      rotation_xz_u32(x, z, xz0_lo, xz0_hi);
-      uint32_t neg_end = end < zero_yy ? end : zero_yy;
-      uint32_t pos_begin = begin > zero_yy ? begin : zero_yy;
+    uint32_t xz0_lo, xz0_hi;
+    rotation_xz_u32(x, z, xz0_lo, xz0_hi);
+    uint32_t neg_end = end < zero_yy ? end : zero_yy;
+    uint32_t pos_begin = begin > zero_yy ? begin : zero_yy;
 
+    if constexpr (Mode == 0) {
       B12RegsSingle sregs{};
       if (nb > 1u) {
-        PackedBlock sb1 = s_blocks[single_n][1];
+        PackedBlock sb1 = s_blocks[0][1];
         sregs.b1_y = sb1.y;
         sregs.b1_meta = sb1.meta;
-        rotation_xz_u32(int32_t(add_i32_wrap(x, sb1.x)), int32_t(add_i32_wrap(z, sb1.z)), sregs.xz1_lo, sregs.xz1_hi);
+        if (sb1.x == 0 && sb1.z == 0) {
+          sregs.xz1_lo = xz0_lo;
+          sregs.xz1_hi = xz0_hi;
+        } else {
+          rotation_xz_u32(int32_t(add_i32_wrap(x, sb1.x)), int32_t(add_i32_wrap(z, sb1.z)), sregs.xz1_lo, sregs.xz1_hi);
+        }
       }
       if (nb > 2u) {
-        PackedBlock sb2 = s_blocks[single_n][2];
+        PackedBlock sb2 = s_blocks[0][2];
         sregs.b2_y = sb2.y;
         sregs.b2_meta = sb2.meta;
-        rotation_xz_u32(int32_t(add_i32_wrap(x, sb2.x)), int32_t(add_i32_wrap(z, sb2.z)), sregs.xz2_lo, sregs.xz2_hi);
+        if (sb2.x == 0 && sb2.z == 0) {
+          sregs.xz2_lo = xz0_lo;
+          sregs.xz2_hi = xz0_hi;
+        } else {
+          rotation_xz_u32(int32_t(add_i32_wrap(x, sb2.x)), int32_t(add_i32_wrap(z, sb2.z)), sregs.xz2_lo, sregs.xz2_hi);
+        }
       }
 
       if constexpr (NonNegY) {
@@ -341,106 +376,90 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
         sweep_segment_single<AnchorSide>(
             begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
             x, ymin, z, task_base_idx, single_n, target_r0,
-            s_blocks, blocks, nb, sregs, results, result_count);
+            s_blocks[0], blocks, nb, sregs, results, result_count);
       } else {
         if (begin < neg_end) {
           uint32_t ly_neg = ~xz0_hi;
           sweep_segment_single<AnchorSide>(
               begin, neg_end, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
               x, ymin, z, task_base_idx, single_n, target_r0,
-              s_blocks, blocks, nb, sregs, results, result_count);
+              s_blocks[0], blocks, nb, sregs, results, result_count);
         }
         if (pos_begin < end) {
           uint32_t ly_pos = xz0_hi;
           sweep_segment_single<AnchorSide>(
               pos_begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
               x, ymin, z, task_base_idx, single_n, target_r0,
-              s_blocks, blocks, nb, sregs, results, result_count);
+              s_blocks[0], blocks, nb, sregs, results, result_count);
         }
       }
     } else {
-      uint64_t xz0 = rotation_xz_u64(x, z);
-      uint64_t xz1[4] = {};
+      uint32_t xz1_lo0 = 0u, xz1_hi0 = 0u, xz1_lo1 = 0u, xz1_hi1 = 0u;
+      uint32_t xz1_lo2 = 0u, xz1_hi2 = 0u, xz1_lo3 = 0u, xz1_hi3 = 0u;
+      int32_t b1_y = 0;
+      uint32_t b1_r_pack = 0u, b1_mask = 0u;
       if (nb > 1u) {
-        #pragma unroll
-        for (int n = 0; n < 4; n++) {
-          if (AllFour || (north_mask & (1u << n))) {
-            PackedBlock b1 = load_packed_global(blocks, n, 1u, nb);
-            xz1[n] = rotation_xz_u64(int32_t(add_i32_wrap(x, b1.x)), int32_t(add_i32_wrap(z, b1.z)));
-          }
+        if (AllFour || (north_mask & 1u)) {
+          PackedBlock b = s_blocks[0][1];
+          b1_y = b.y;
+          b1_mask = b.meta >> 8u;
+          b1_r_pack |= (b.meta & 3u);
+          if (b.x == 0 && b.z == 0) { xz1_lo0 = xz0_lo; xz1_hi0 = xz0_hi; }
+          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo0, xz1_hi0);
+        }
+        if (AllFour || (north_mask & 2u)) {
+          PackedBlock b = s_blocks[1][1];
+          b1_y = b.y;
+          b1_mask = b.meta >> 8u;
+          b1_r_pack |= (b.meta & 3u) << 2u;
+          if (b.x == 0 && b.z == 0) { xz1_lo1 = xz0_lo; xz1_hi1 = xz0_hi; }
+          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo1, xz1_hi1);
+        }
+        if (AllFour || (north_mask & 4u)) {
+          PackedBlock b = s_blocks[2][1];
+          b1_y = b.y;
+          b1_mask = b.meta >> 8u;
+          b1_r_pack |= (b.meta & 3u) << 4u;
+          if (b.x == 0 && b.z == 0) { xz1_lo2 = xz0_lo; xz1_hi2 = xz0_hi; }
+          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo2, xz1_hi2);
+        }
+        if (AllFour || (north_mask & 8u)) {
+          PackedBlock b = s_blocks[3][1];
+          b1_y = b.y;
+          b1_mask = b.meta >> 8u;
+          b1_r_pack |= (b.meta & 3u) << 6u;
+          if (b.x == 0 && b.z == 0) { xz1_lo3 = xz0_lo; xz1_hi3 = xz0_hi; }
+          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo3, xz1_hi3);
         }
       }
 
-      uint32_t yy = begin;
-      for (; yy + 3u < end; yy += 4u) {
-        int32_t y0 = int32_t(uint32_t(ymin) + yy);
-        int32_t y1 = int32_t(uint32_t(ymin) + yy + 1u);
-        int32_t y2 = int32_t(uint32_t(ymin) + yy + 2u);
-        int32_t y3 = int32_t(uint32_t(ymin) + yy + 3u);
-
-        int r0, r1, r2, r3;
-        rotation_y4_u64(xz0, y0, r0, r1, r2, r3);
-        int n0 = AnchorSide ? ((r0 - (rA & 1)) & 1) : ((r0 - rA) & 3);
-        int n1 = AnchorSide ? ((r1 - (rA & 1)) & 1) : ((r1 - rA) & 3);
-        int n2 = AnchorSide ? ((r2 - (rA & 1)) & 1) : ((r2 - rA) & 3);
-        int n3 = AnchorSide ? ((r3 - (rA & 1)) & 1) : ((r3 - rA) & 3);
-
-        if constexpr (!AllFour) {
-          bool m0 = (north_mask & (bit_pat << n0)) != 0;
-          bool m1 = (north_mask & (bit_pat << n1)) != 0;
-          bool m2 = (north_mask & (bit_pat << n2)) != 0;
-          bool m3 = (north_mask & (bit_pat << n3)) != 0;
-          if (!m0 && !m1 && !m2 && !m3) continue;
+      if constexpr (NonNegY) {
+        uint32_t ly_pos = xz0_hi;
+        sweep_segment_multi<AnchorSide, AllFour>(
+            begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
+            x, ymin, z, task_base_idx, north_mask, rA,
+            s_blocks, blocks, nb,
+            xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+            b1_y, b1_r_pack, b1_mask, results, result_count);
+      } else {
+        if (begin < neg_end) {
+          uint32_t ly_neg = ~xz0_hi;
+          sweep_segment_multi<AnchorSide, AllFour>(
+              begin, neg_end, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
+              x, ymin, z, task_base_idx, north_mask, rA,
+              s_blocks, blocks, nb,
+              xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+              b1_y, b1_r_pack, b1_mask, results, result_count);
         }
-
-        if ((AllFour || (north_mask & (1u << n0))) && check_multi_const(blocks, nb, n0, x, y0, z, xz1[n0]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30u) | (task_base_idx + yy);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n0 + 2)))) && check_multi_const(blocks, nb, n0 + 2, x, y0, z, xz1[n0 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0 + 2) << 30u) | (task_base_idx + yy);
-
-        if ((AllFour || (north_mask & (1u << n1))) && check_multi_const(blocks, nb, n1, x, y1, z, xz1[n1]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n1) << 30u) | (task_base_idx + yy + 1u);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n1 + 2)))) && check_multi_const(blocks, nb, n1 + 2, x, y1, z, xz1[n1 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n1 + 2) << 30u) | (task_base_idx + yy + 1u);
-
-        if ((AllFour || (north_mask & (1u << n2))) && check_multi_const(blocks, nb, n2, x, y2, z, xz1[n2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n2) << 30u) | (task_base_idx + yy + 2u);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n2 + 2)))) && check_multi_const(blocks, nb, n2 + 2, x, y2, z, xz1[n2 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n2 + 2) << 30u) | (task_base_idx + yy + 2u);
-
-        if ((AllFour || (north_mask & (1u << n3))) && check_multi_const(blocks, nb, n3, x, y3, z, xz1[n3]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n3) << 30u) | (task_base_idx + yy + 3u);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n3 + 2)))) && check_multi_const(blocks, nb, n3 + 2, x, y3, z, xz1[n3 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n3 + 2) << 30u) | (task_base_idx + yy + 3u);
-      }
-      for (; yy + 1u < end; yy += 2u) {
-        int32_t y0 = int32_t(uint32_t(ymin) + yy);
-        int32_t y1 = int32_t(uint32_t(ymin) + yy + 1u);
-        int r0, r1;
-        rotation_y2_u64(xz0, y0, r0, r1);
-        int n0 = AnchorSide ? ((r0 - (rA & 1)) & 1) : ((r0 - rA) & 3);
-        int n1 = AnchorSide ? ((r1 - (rA & 1)) & 1) : ((r1 - rA) & 3);
-        if constexpr (!AllFour) {
-          if (((north_mask & (bit_pat << n0)) == 0) && ((north_mask & (bit_pat << n1)) == 0)) continue;
+        if (pos_begin < end) {
+          uint32_t ly_pos = xz0_hi;
+          sweep_segment_multi<AnchorSide, AllFour>(
+              pos_begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
+              x, ymin, z, task_base_idx, north_mask, rA,
+              s_blocks, blocks, nb,
+              xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
+              b1_y, b1_r_pack, b1_mask, results, result_count);
         }
-        if ((AllFour || (north_mask & (1u << n0))) && check_multi_const(blocks, nb, n0, x, y0, z, xz1[n0]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30u) | (task_base_idx + yy);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n0 + 2)))) && check_multi_const(blocks, nb, n0 + 2, x, y0, z, xz1[n0 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0 + 2) << 30u) | (task_base_idx + yy);
-
-        if ((AllFour || (north_mask & (1u << n1))) && check_multi_const(blocks, nb, n1, x, y1, z, xz1[n1]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n1) << 30u) | (task_base_idx + yy + 1u);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n1 + 2)))) && check_multi_const(blocks, nb, n1 + 2, x, y1, z, xz1[n1 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n1 + 2) << 30u) | (task_base_idx + yy + 1u);
-      }
-      for (; yy < end; yy++) {
-        int32_t y0 = int32_t(uint32_t(ymin) + yy);
-        int r0 = rotation_y_u64(xz0, y0);
-        int n0 = AnchorSide ? ((r0 - (rA & 1)) & 1) : ((r0 - rA) & 3);
-        if ((AllFour || (north_mask & (1u << n0))) && check_multi_const(blocks, nb, n0, x, y0, z, xz1[n0]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0) << 30u) | (task_base_idx + yy);
-        if (AnchorSide && (AllFour || (north_mask & (1u << (n0 + 2)))) && check_multi_const(blocks, nb, n0 + 2, x, y0, z, xz1[n0 + 2]))
-          results[atomicAdd(result_count, 1u)] = (uint32_t(n0 + 2) << 30u) | (task_base_idx + yy);
       }
     }
 
@@ -553,7 +572,7 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
   }
 
   std::string key = std::string(prop.name) + "/" + std::to_string(prop.major) + "." + std::to_string(prop.minor) +
-                    "/columns-ptx-smem-v7/" + std::to_string(s_opt.dim[1]) + "/" + std::to_string(s_opt.dim[2]);
+                    "/columns-ptx-smem-v8/" + std::to_string(s_opt.dim[1]) + "/" + std::to_string(s_opt.dim[2]);
   key += "/mask=" + std::to_string(north_mask) + "/rA=" + std::to_string(rA);
   for (auto b : tuneBlocks)
     key += "/" + std::to_string(b.x) + "," + std::to_string(b.y) + "," + std::to_string(b.z) + "," +
@@ -584,7 +603,8 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
     return fallback;
   }
 
-  uint32_t n = uint32_t(std::min<uint64_t>(batch, std::min<uint64_t>(s_opt.total, 4194304)));
+  uint32_t sample_cap = (s_opt.dim[1] >= 128u) ? 16777216u : 4194304u;
+  uint32_t n = uint32_t(std::min<uint64_t>(batch, std::min<uint64_t>(s_opt.total, sample_cap)));
   std::vector<uint32_t> reference;
   float best = std::numeric_limits<float>::max();
   Tune selected = fallback;
@@ -744,8 +764,17 @@ int main(int argc, char** argv) {
       s_opt.total *= s_opt.dim[i];
     }
 
-    const uint32_t batch = tuning("GRASS_BATCH", 16777216, 256, 16777216);
-    bool fast = s_opt.dim[1] <= 4096 && s_opt.dim[2] <= uint64_t(UINT32_MAX - 16777216u) && !std::getenv("GRASS_CUDA_FORCE_WIDE");
+    cudaDeviceProp prop{};
+    check(cudaGetDeviceProperties(&prop, 0));
+
+    uint32_t default_batch = 16777216u;
+    if (s_opt.dim[1] >= 256u && prop.totalGlobalMem >= (6ULL << 30) && !anchor_side) {
+      default_batch = 67108864u;
+    } else if (s_opt.dim[1] >= 128u && prop.totalGlobalMem >= (3ULL << 30)) {
+      default_batch = 33554432u;
+    }
+    const uint32_t batch = tuning("GRASS_BATCH", default_batch, 256, 67108864);
+    bool fast = s_opt.dim[1] <= 4096 && s_opt.dim[2] <= uint64_t(UINT32_MAX - batch) && !std::getenv("GRASS_CUDA_FORCE_WIDE");
 
     uint32_t nz32 = fast ? uint32_t(s_opt.dim[2]) : 1u;
     uint32_t nz_inv = (nz32 <= 1u) ? 0xFFFFFFFFu : uint32_t(0x100000000ULL / nz32);
@@ -799,9 +828,6 @@ int main(int argc, char** argv) {
       check(cudaMallocHost((void**)&host_results[s], pinned_cap * sizeof(uint32_t)));
       check(cudaMallocHost((void**)&host_count[s], sizeof(uint32_t)));
     }
-
-    cudaDeviceProp prop{};
-    check(cudaGetDeviceProperties(&prop, 0));
 
     Tune tune = autotune(prop, db, original, df[0], dc[0], streams[0], s_opt, mode, fast, alloc_batch,
                          north_mask, rA, anchor_side, single_n, nz_inv, zero_yy);

@@ -81,7 +81,7 @@ function getPixelsBuffer(): ArrayBuffer {
 function postDetect(seeds?: any) {
   const buf = getPixelsBuffer();
   $('#detLog').textContent = ''; setStatus('detecting', 'busy'); $('#detBar').hidden = false; $('#detBar').classList.add('indeterminate'); $('#detBar i').style.width = '0%'; $('#detBar').setAttribute('aria-valuenow', '0');
-  worker!.postMessage({ type: 'detect', width: img!.width, height: img!.height, buffer: buf, ref, seeds, opts: { accept: Number($('#thr').value), backend: 'auto' } }, [buf]);
+  worker!.postMessage({ type: 'detect', width: img!.width, height: img!.height, buffer: buf, ref, seeds, opts: { accept: Number($('#thr').value), backend: 'wasm' } }, [buf]);
 }
 
 /* image loading */
@@ -282,7 +282,7 @@ $('#btnAddFace').onclick = () => {
       onQuadResult(m);
     } else prev.call(worker, e);
   };
-  worker.postMessage({ type: 'classifyQuad', width: img.width, height: img.height, buffer: buf, ref, opts: {backend: 'auto'}, quad: quad.map(p => p.slice()) }, [buf]);
+  worker.postMessage({ type: 'classifyQuad', width: img.width, height: img.height, buffer: buf, ref, opts: {backend: 'wasm'}, quad: quad.map(p => p.slice()) }, [buf]);
 };
 setMode('auto');
 startWorker();

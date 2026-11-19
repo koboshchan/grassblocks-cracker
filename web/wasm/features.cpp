@@ -10,6 +10,9 @@
 #include <opencv2/calib3d.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/imgproc.hpp>
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+#endif
 
 extern "C" {
 int extract(float* image, int width, int height);
@@ -194,6 +197,297 @@ int removeInliers(std::vector<cv::Point2f>& P, std::vector<cv::Point2f>& Q,
     return inliers;
 }
 
+bool solveLinear8(double A[8][9], double out[8]) {
+    for (int col = 0; col < 8; ++col) {
+        int piv = col;
+        double best = std::abs(A[col][col]);
+        for (int r = col + 1; r < 8; ++r) {
+            double v = std::abs(A[r][col]);
+            if (v > best) { best = v; piv = r; }
+        }
+        if (best < 1e-12) return false;
+        if (piv != col) {
+            for (int j = col; j < 9; ++j) std::swap(A[col][j], A[piv][j]);
+        }
+        double invD = 1.0 / A[col][col];
+        for (int j = col; j < 9; ++j) A[col][j] *= invD;
+        for (int r = 0; r < 8; ++r) {
+            if (r == col) continue;
+            double f = A[r][col];
+            if (f == 0.0) continue;
+            for (int j = col; j < 9; ++j) A[r][j] -= f * A[col][j];
+        }
+    }
+    for (int i = 0; i < 8; ++i) out[i] = A[i][8];
+    return true;
+}
+
+bool solveHomography4(const cv::Point2f p[4], const cv::Point2f q[4], double H[9]) {
+    // Reject collinear 3-point subsets cheaply before solving 8x8.
+    static constexpr int tri[4][3] = {{0, 1, 2}, {0, 1, 3}, {0, 2, 3}, {1, 2, 3}};
+    for (const auto& t : tri) {
+        float cp = (p[t[1]].x - p[t[0]].x) * (p[t[2]].y - p[t[0]].y) -
+                   (p[t[1]].y - p[t[0]].y) * (p[t[2]].x - p[t[0]].x);
+        float cq = (q[t[1]].x - q[t[0]].x) * (q[t[2]].y - q[t[0]].y) -
+                   (q[t[1]].y - q[t[0]].y) * (q[t[2]].x - q[t[0]].x);
+        if (std::abs(cp) < 4.0f || std::abs(cq) < 4.0f) return false;
+    }
+    double A[8][9]{};
+    for (int i = 0; i < 4; ++i) {
+        double x = p[i].x, y = p[i].y, u = q[i].x, v = q[i].y;
+        A[2 * i][0] = x; A[2 * i][1] = y; A[2 * i][2] = 1.0;
+        A[2 * i][6] = -u * x; A[2 * i][7] = -u * y; A[2 * i][8] = u;
+        A[2 * i + 1][3] = x; A[2 * i + 1][4] = y; A[2 * i + 1][5] = 1.0;
+        A[2 * i + 1][6] = -v * x; A[2 * i + 1][7] = -v * y; A[2 * i + 1][8] = v;
+    }
+    double sol[8];
+    if (!solveLinear8(A, sol)) return false;
+    for (int i = 0; i < 8; ++i) H[i] = sol[i];
+    H[8] = 1.0;
+    return true;
+}
+
+bool solveHomographyLS(const std::vector<cv::Point2f>& P,
+                       const std::vector<cv::Point2f>& Q,
+                       const std::vector<int>& ids,
+                       double H[9]) {
+    if (ids.size() < 4) return false;
+    double cxp = 0, cyp = 0, cxq = 0, cyq = 0;
+    const double invN = 1.0 / ids.size();
+    for (int idx : ids) {
+        cxp += P[idx].x; cyp += P[idx].y;
+        cxq += Q[idx].x; cyq += Q[idx].y;
+    }
+    cxp *= invN; cyp *= invN; cxq *= invN; cyq *= invN;
+    double dp = 0, dq = 0;
+    for (int idx : ids) {
+        dp += std::hypot(P[idx].x - cxp, P[idx].y - cyp);
+        dq += std::hypot(Q[idx].x - cxq, Q[idx].y - cyq);
+    }
+    dp *= invN; dq *= invN;
+    if (dp < 1e-6 || dq < 1e-6) return false;
+    double sp = std::sqrt(2.0) / dp, sq = std::sqrt(2.0) / dq;
+
+    double Nmat[8][9]{};
+    for (int idx : ids) {
+        double x = (P[idx].x - cxp) * sp, y = (P[idx].y - cyp) * sp;
+        double u = (Q[idx].x - cxq) * sq, v = (Q[idx].y - cyq) * sq;
+        double r1[9] = {x, y, 1.0, 0.0, 0.0, 0.0, -u * x, -u * y, u};
+        double r2[9] = {0.0, 0.0, 0.0, x, y, 1.0, -v * x, -v * y, v};
+        for (int a = 0; a < 8; ++a) {
+            Nmat[a][8] += r1[a] * r1[8] + r2[a] * r2[8];
+            for (int b = 0; b < 8; ++b) Nmat[a][b] += r1[a] * r1[b] + r2[a] * r2[b];
+        }
+    }
+    double sol[8];
+    if (!solveLinear8(Nmat, sol)) return false;
+    double Hn[9] = {sol[0], sol[1], sol[2], sol[3], sol[4], sol[5], sol[6], sol[7], 1.0};
+    // Denormalize: H = Tq^{-1} * Hn * Tp
+    double Tp[9] = {sp, 0, -sp * cxp, 0, sp, -sp * cyp, 0, 0, 1};
+    double Tqi[9] = {1.0 / sq, 0, cxq, 0, 1.0 / sq, cyq, 0, 0, 1};
+    double tmp[9]{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) tmp[i * 3 + j] += Hn[i * 3 + k] * Tp[k * 3 + j];
+    for (int i = 0; i < 9; ++i) H[i] = 0.0;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            for (int k = 0; k < 3; ++k) H[i * 3 + j] += Tqi[i * 3 + k] * tmp[k * 3 + j];
+    if (std::abs(H[8]) < 1e-12) return false;
+    double invH8 = 1.0 / H[8];
+    for (int i = 0; i < 9; ++i) H[i] *= invH8;
+    return true;
+}
+
+int countInliersH(const std::vector<cv::Point2f>& P,
+                  const std::vector<cv::Point2f>& Q,
+                  const double H[9], float thresh2) {
+    const float h0 = float(H[0]), h1 = float(H[1]), h2 = float(H[2]);
+    const float h3 = float(H[3]), h4 = float(H[4]), h5 = float(H[5]);
+    const float h6 = float(H[6]), h7 = float(H[7]), h8 = float(H[8]);
+    int count = 0;
+    const int n = static_cast<int>(P.size());
+    for (int i = 0; i < n; ++i) {
+        const float px = P[i].x, py = P[i].y;
+        const float d = h6 * px + h7 * py + h8;
+        if (d <= 1e-6f) continue;
+        const float invD = 1.0f / d;
+        const float dx = (h0 * px + h1 * py + h2) * invD - Q[i].x;
+        const float dy = (h3 * px + h4 * py + h5) * invD - Q[i].y;
+        if (dx * dx + dy * dy <= thresh2) ++count;
+    }
+    return count;
+}
+
+// Spatially-guided NAPSAC + global RANSAC for multi-tile homography extraction.
+// Grass tiles are spatially compact in image space, so sampling 3 neighbors near
+// an anchor raises 4-point same-tile hit rate by orders of magnitude over uniform RANSAC.
+int findAndRemoveHomographyNapsac(std::vector<cv::Point2f>& P,
+                                  std::vector<cv::Point2f>& Q,
+                                  int S, int w, int h,
+                                  int minInliers,
+                                  Quad& outQuad,
+                                  bool& outValid,
+                                  std::uint64_t& rng) {
+    outValid = false;
+    const int n = static_cast<int>(P.size());
+    if (n < 10) return 0;
+
+    auto nextRand = [&]() -> std::uint32_t {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return static_cast<std::uint32_t>(rng);
+    };
+
+    const float thresh2 = 2.5f * 2.5f;
+    const float radii2[3] = {
+        std::max(80.0f, std::min(w, h) * 0.12f),
+        std::max(180.0f, std::min(w, h) * 0.28f),
+        0.0f // global uniform fallback
+    };
+    const float r2Sq[2] = {radii2[0] * radii2[0], radii2[1] * radii2[1]};
+
+    std::vector<int> pool;
+    pool.reserve(n);
+    double bestH[9]{};
+    int bestCount = 0;
+    int maxIters = 600;
+
+    for (int iter = 0; iter < maxIters; ++iter) {
+        int ids[4];
+        const int mode = iter & 3; // 0,1: tight NAPSAC; 2: wide NAPSAC; 3: global
+        if (mode < 3) {
+            const float limit2 = (mode < 2) ? r2Sq[0] : r2Sq[1];
+            ids[0] = static_cast<int>(nextRand() % static_cast<std::uint32_t>(n));
+            const float ax = Q[ids[0]].x, ay = Q[ids[0]].y;
+            pool.clear();
+            for (int j = 0; j < n; ++j) {
+                if (j == ids[0]) continue;
+                float dx = Q[j].x - ax, dy = Q[j].y - ay;
+                if (dx * dx + dy * dy <= limit2) pool.push_back(j);
+            }
+            if (pool.size() >= 3) {
+                const std::uint32_t m = static_cast<std::uint32_t>(pool.size());
+                int a = static_cast<int>(nextRand() % m);
+                int b = static_cast<int>(nextRand() % (m - 1));
+                if (b >= a) ++b;
+                int c = static_cast<int>(nextRand() % (m - 2));
+                int lo = std::min(a, b), hi = std::max(a, b);
+                if (c >= lo) ++c;
+                if (c >= hi) ++c;
+                ids[1] = pool[a];
+                ids[2] = pool[b];
+                ids[3] = pool[c];
+            } else {
+                // Fall back to global uniform if local neighborhood is sparse.
+                for (int k = 1; k < 4; ++k) {
+                    int cand;
+                    do {
+                        cand = static_cast<int>(nextRand() % static_cast<std::uint32_t>(n));
+                    } while (std::find(ids, ids + k, cand) != ids + k);
+                    ids[k] = cand;
+                }
+            }
+        } else {
+            for (int k = 0; k < 4; ++k) {
+                int cand;
+                do {
+                    cand = static_cast<int>(nextRand() % static_cast<std::uint32_t>(n));
+                } while (std::find(ids, ids + k, cand) != ids + k);
+                ids[k] = cand;
+            }
+        }
+
+        cv::Point2f sp[4] = {P[ids[0]], P[ids[1]], P[ids[2]], P[ids[3]]};
+        cv::Point2f sq[4] = {Q[ids[0]], Q[ids[1]], Q[ids[2]], Q[ids[3]]};
+        double H[9];
+        if (!solveHomography4(sp, sq, H)) continue;
+        // Quick corner sanity check before scanning all points.
+        bool badCorner = false;
+        for (int c = 0; c < 4; ++c) {
+            double cx = (c == 1 || c == 2) ? S : 0.0;
+            double cy = (c >= 2) ? S : 0.0;
+            if (H[6] * cx + H[7] * cy + H[8] <= 1e-4) { badCorner = true; break; }
+        }
+        if (badCorner) continue;
+
+        int cnt = countInliersH(P, Q, H, thresh2);
+        if (cnt > bestCount) {
+            bestCount = cnt;
+            std::copy(H, H + 9, bestH);
+            if (bestCount >= 16 && iter >= 160) {
+                double ratioIn = double(bestCount) / double(n);
+                double p4 = ratioIn * ratioIn * ratioIn * ratioIn;
+                if (p4 > 1e-4 && p4 < 0.999) {
+                    int est = static_cast<int>(std::ceil(std::log(0.005) / std::log(1.0 - p4)));
+                    maxIters = std::min(maxIters, std::max(160, est));
+                }
+            }
+        }
+    }
+
+    if (bestCount < minInliers) return bestCount;
+
+    // Two-pass least-squares polish on all inliers.
+    std::vector<int> inlierIds;
+    inlierIds.reserve(bestCount + 16);
+    for (int pass = 0; pass < 2; ++pass) {
+        inlierIds.clear();
+        for (int i = 0; i < n; ++i) {
+            double d = bestH[6] * P[i].x + bestH[7] * P[i].y + bestH[8];
+            if (d <= 1e-6) continue;
+            double dx = (bestH[0] * P[i].x + bestH[1] * P[i].y + bestH[2]) / d - Q[i].x;
+            double dy = (bestH[3] * P[i].x + bestH[4] * P[i].y + bestH[5]) / d - Q[i].y;
+            if (dx * dx + dy * dy <= thresh2) inlierIds.push_back(i);
+        }
+        if (static_cast<int>(inlierIds.size()) < minInliers) return static_cast<int>(inlierIds.size());
+        double refined[9];
+        if (solveHomographyLS(P, Q, inlierIds, refined)) {
+            int cntRef = countInliersH(P, Q, refined, thresh2);
+            if (cntRef >= static_cast<int>(inlierIds.size())) {
+                std::copy(refined, refined + 9, bestH);
+            }
+        }
+    }
+
+    // Final inlier mask & removal preserving order.
+    std::vector<unsigned char> isInlier(n, 0);
+    int finalCount = 0;
+    for (int i = 0; i < n; ++i) {
+        double d = bestH[6] * P[i].x + bestH[7] * P[i].y + bestH[8];
+        if (d <= 1e-6) continue;
+        double dx = (bestH[0] * P[i].x + bestH[1] * P[i].y + bestH[2]) / d - Q[i].x;
+        double dy = (bestH[3] * P[i].x + bestH[4] * P[i].y + bestH[5]) / d - Q[i].y;
+        if (dx * dx + dy * dy <= thresh2) {
+            isInlier[i] = 1;
+            ++finalCount;
+        }
+    }
+    if (finalCount < minInliers) return finalCount;
+
+    std::size_t out = 0;
+    for (int i = 0; i < n; ++i) {
+        if (!isInlier[i]) {
+            P[out] = P[i];
+            Q[out] = Q[i];
+            ++out;
+        }
+    }
+    P.resize(out);
+    Q.resize(out);
+
+    static constexpr double cs[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    for (int i = 0; i < 4; ++i) {
+        double x = cs[i][0] * S, y = cs[i][1] * S;
+        double d = bestH[6] * x + bestH[7] * y + bestH[8];
+        outQuad[i] = {(bestH[0] * x + bestH[1] * y + bestH[2]) / d,
+                      (bestH[3] * x + bestH[4] * y + bestH[5]) / d};
+    }
+    outValid = true;
+    return finalCount;
+}
+
 // Typed-array assignment uses ToUint8, not OpenCV saturate_cast/round.
 unsigned char jsUint8(double value) {
     if (!std::isfinite(value)) return 0;
@@ -266,6 +560,45 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
             for (int j = 0; j < a.count; ++j) {
                 const int aj = j * FeatureStride + 2;
                 const float* ap = a.data.data() + aj;
+#ifdef __wasm_simd128__
+                v128_t acc0 = wasm_f32x4_splat(0.0f);
+                v128_t acc1 = wasm_f32x4_splat(0.0f);
+                float distance = 0.0f;
+                const float cutoff = static_cast<float>(second);
+                for (int k = 0; k < 128; k += 32) {
+                    v128_t a0 = wasm_f32x4_sub(wasm_v128_load(bp + k), wasm_v128_load(ap + k));
+                    v128_t a1 = wasm_f32x4_sub(wasm_v128_load(bp + k + 4), wasm_v128_load(ap + k + 4));
+                    v128_t a2 = wasm_f32x4_sub(wasm_v128_load(bp + k + 8), wasm_v128_load(ap + k + 8));
+                    v128_t a3 = wasm_f32x4_sub(wasm_v128_load(bp + k + 12), wasm_v128_load(ap + k + 12));
+                    acc0 = wasm_f32x4_add(acc0, wasm_f32x4_mul(a0, a0));
+                    acc1 = wasm_f32x4_add(acc1, wasm_f32x4_mul(a1, a1));
+                    acc0 = wasm_f32x4_add(acc0, wasm_f32x4_mul(a2, a2));
+                    acc1 = wasm_f32x4_add(acc1, wasm_f32x4_mul(a3, a3));
+                    v128_t a4 = wasm_f32x4_sub(wasm_v128_load(bp + k + 16), wasm_v128_load(ap + k + 16));
+                    v128_t a5 = wasm_f32x4_sub(wasm_v128_load(bp + k + 20), wasm_v128_load(ap + k + 20));
+                    v128_t a6 = wasm_f32x4_sub(wasm_v128_load(bp + k + 24), wasm_v128_load(ap + k + 24));
+                    v128_t a7 = wasm_f32x4_sub(wasm_v128_load(bp + k + 28), wasm_v128_load(ap + k + 28));
+                    acc0 = wasm_f32x4_add(acc0, wasm_f32x4_mul(a4, a4));
+                    acc1 = wasm_f32x4_add(acc1, wasm_f32x4_mul(a5, a5));
+                    acc0 = wasm_f32x4_add(acc0, wasm_f32x4_mul(a6, a6));
+                    acc1 = wasm_f32x4_add(acc1, wasm_f32x4_mul(a7, a7));
+                    if (k == 64) {
+                        v128_t sum = wasm_f32x4_add(acc0, acc1);
+                        sum = wasm_f32x4_add(sum, wasm_i32x4_shuffle(sum, sum, 2, 3, 0, 1));
+                        sum = wasm_f32x4_add(sum, wasm_i32x4_shuffle(sum, sum, 1, 0, 3, 2));
+                        if (wasm_f32x4_extract_lane(sum, 0) >= cutoff) {
+                            distance = cutoff;
+                            break;
+                        }
+                    }
+                }
+                if (distance < cutoff) {
+                    v128_t sum = wasm_f32x4_add(acc0, acc1);
+                    sum = wasm_f32x4_add(sum, wasm_i32x4_shuffle(sum, sum, 2, 3, 0, 1));
+                    sum = wasm_f32x4_add(sum, wasm_i32x4_shuffle(sum, sum, 1, 0, 3, 2));
+                    distance = wasm_f32x4_extract_lane(sum, 0);
+                }
+#else
                 double distance = 0;
                 for (int k = 0; k < 128; k += 8) {
                     // JS converts both Float32 samples to double BEFORE subtracting.
@@ -287,6 +620,7 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
                     distance += v7 * v7;
                     if (distance >= second) break;
                 }
+#endif
                 if (distance < best) {
                     second = best;
                     best = distance;
@@ -316,11 +650,11 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h,
         }
     }
     std::vector<Quad> found;
+    std::uint64_t rng = 0x9e3779b97f4a7c15ULL ^ (static_cast<std::uint64_t>(P.size()) * 0xbf58476d1ce4e5b9ULL);
     for (int it = 0; it < 20 && P.size() >= 10; ++it) {
-        cv::Mat mask;
-        const cv::Mat H = cv::findHomography(P, Q, cv::RANSAC, 2.5, mask, 2500, .99);
-        if (H.empty() || removeInliers(P, Q, mask, 8) < 8) break;
-        const Quad q = project(H, S);
+        Quad q{};
+        bool ok = false;
+        if (findAndRemoveHomographyNapsac(P, Q, S, w, h, 8, q, ok, rng) < 8 || !ok) break;
         if (!inImage(q, w, h)) continue;
         const int sign = winding(q);
         const double area = std::abs(signedAreaTwice(q)) / 2;

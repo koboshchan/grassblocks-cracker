@@ -77,7 +77,20 @@ async function gpuSolver(){
  const blockLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'read-only-storage'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}},{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
  const layout=device.createPipelineLayout({bindGroupLayouts:[blockLayout]});
  let wg=128,items=1;
- let pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});
+ const pipeCache=new Map<string,Promise<GPUComputePipeline>>();
+ function getSearchPipeline(w:number,it:number,singleNorth:number,allFour:boolean):Promise<GPUComputePipeline>{
+  const key=`${w}:${it}:${singleNorth}:${allFour?1:0}`;
+  let p=pipeCache.get(key);
+  if(!p){
+   p=device.createComputePipelineAsync({
+    layout,
+    compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it,SINGLE_NORTH:singleNorth,ALL_FOUR:allFour?1:0}},
+   });
+   pipeCache.set(key,p);
+  }
+  return p;
+ }
+ await getSearchPipeline(wg,items,-1,false);
  let tuned=false;let tuning:any=null;
  const RING_SIZE=4;
  const resultSize=16+4096*16;
@@ -122,29 +135,33 @@ async function gpuSolver(){
   device.queue.writeBuffer(results[i],0,zero4);
  }
  device.queue.writeBuffer(blockBuffer,0,packed.data);
- let target=131072;
+ const nySpan=Math.min(128,ayMax-ayMin+1);
+ let target=nySpan>64?65536:131072;
+ const singleNorth=opts.north.length===1?opts.north[0]:-1;
+ const allFour=packed.activeMask===15;
  if(!tuned){
  let cached:any=null;try{cached=JSON.parse(localStorage.getItem(cacheKey)||'null');}catch{}
  if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
- wg=cached.wg;items=cached.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...cached,cached:true};
+ wg=cached.wg;items=cached.items;tuning={...cached,cached:true};
  }else{
  const trials:any[]=[];const count=262144,benchY=Math.min(ayMax,ayMin+31);
  par[0]=axMin;par[1]=azMin;par[2]=ayMin;par[3]=benchY;par[4]=1024;par[5]=0;par[6]=count;par[7]=blocks.length;
  device.queue.writeBuffer(params[0],0,par);
  tuneLoop: for(const w of [64,128,256])for(const it of [1,2,4]){
   await opts.waitIfPaused?.();if(opts.signal?.aborted)break tuneLoop;
-  const candidate=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it}}});
+  const candidate=await getSearchPipeline(w,it,singleNorth,allFour);
   const times:number[]=[];
   for(let rep=0;rep<3;rep++){
   device.queue.writeBuffer(results[0],0,zero4);const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(candidate);pass.setBindGroup(0,groups[0]);pass.dispatchWorkgroups(Math.ceil(count/(w*it)));pass.end();const before=performance.now();device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();if(rep)times.push(performance.now()-before);
   }
   trials.push({wg:w,items:it,ms:Math.min(...times)});
  }
- trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:128,items:1,ms:0};wg=best.wg;items=best.items;pipeline=await device.createComputePipelineAsync({layout,compute:{module,entryPoint:'search',constants:{WG_SIZE:wg,ITEMS:items}}});tuning={...best,trials,cached:false};
+ trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:128,items:1,ms:0};wg=best.wg;items=best.items;tuning={...best,trials,cached:false};
  if(!opts.signal?.aborted&&trials.length===9){try{localStorage.setItem(cacheKey,JSON.stringify(best));}catch{}}
  }
  if(!opts.signal?.aborted)tuned=true;
  }
+ const pipeline=await getSearchPipeline(wg,items,singleNorth,allFour);
 
  let currentSlot=0;
  function submitChunk(slot:number,x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number):InFlightTask{
@@ -205,7 +222,8 @@ async function gpuSolver(){
   currentSlot=0;
  }
 
- const Y_STEP=opts.north.length>1?64:32;
+ // Process up to 128 Y levels per column dispatch so rotation_xz column hashes are amortized while keeping thread parallelism high.
+ const Y_STEP=128;
  for(let ya=ayMin;ya<=ayMax;ya+=Y_STEP){
   const yb=Math.min(ayMax,ya+Y_STEP-1);
   for(let za=azMin;za<=azMax;za+=256){
