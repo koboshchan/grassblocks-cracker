@@ -29,6 +29,7 @@ RUN npm ci
 FROM node-dependencies AS webgpu-cracker
 COPY --from=shader-validator /opt/naga/bin/naga /usr/local/bin/naga
 COPY web/kernel.wgsl web/solver.ts web/hash.ts web/solver-worker.ts ./
+COPY web/src/asset-dir.ts src/asset-dir.ts
 COPY web/scripts/build-webgpu.ts scripts/build-webgpu.ts
 RUN npm run build:webgpu
 
