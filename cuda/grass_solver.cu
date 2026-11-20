@@ -23,44 +23,52 @@ static void check(cudaError_t e) {
   if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }
 
+// 6-instruction exact XZ hash using signed __mulhi for z * 116129781.
 __device__ __forceinline__ void rotation_xz_u32(int32_t x, int32_t z, uint32_t& xz_lo, uint32_t& xz_hi) {
   uint32_t xp = uint32_t(x) * 3129871u;
   uint32_t sx_hi = uint32_t(int32_t(xp) >> 31);
-  uint32_t zu = uint32_t(z);
-  uint32_t zp_lo = zu * 116129781u;
-  uint32_t zp_hi = __umulhi(zu, 116129781u) + uint32_t(z >> 31) * 116129781u;
+  uint32_t zp_lo = uint32_t(z) * 116129781u;
+  uint32_t zp_hi = uint32_t(__mulhi(z, 116129781));
   xz_lo = xp ^ zp_lo;
   xz_hi = sx_hi ^ zp_hi;
 }
 
-__device__ __forceinline__ int rotation_y_lh(uint32_t xz_lo, uint32_t K1, uint32_t K0, uint32_t y_lo) {
-  uint32_t lx = xz_lo ^ y_lo;
-  uint32_t s_lo = lx * lx;
-  uint32_t s_hi = __umulhi(lx, lx);
-  uint32_t t_hi = K1 * lx + K0;
-  t_hi = s_hi * 42317861u + t_hi;
-  uint32_t t_lo = lx * 11u;
-  t_hi = __umulhi(lx, 11u) + t_hi;
-
-  uint32_t p_lo, p_hi;
-  asm("mad.lo.cc.u32 %0, %2, %3, %4;\n\t"
-      "madc.hi.u32   %1, %2, %3, %5;"
-      : "=r"(p_lo), "=r"(p_hi)
-      : "r"(s_lo), "r"(42317861u), "r"(t_lo), "r"(t_hi));
-
+// Finishes (p_lo, p_hi) -> step_hi with (-expected << 14) folded for free into IMAD.
+// Only bits 14..15 of step_hi are read, so seed_hi * 0xE66D is exact mod 2^16.
+__device__ __forceinline__ uint32_t finish_p_to_step_hi(
+    uint32_t p_lo, uint32_t p_hi, uint32_t neg_shift) {
   uint32_t seed_lo = __funnelshift_r(p_lo, p_hi, 16u) ^ 0xDEECE66Du;
   uint32_t seed_hi = (p_hi >> 16u) ^ 5u;
-  uint32_t u_hi = seed_lo * 5u;
-  u_hi = seed_hi * 0xDEECE66Du + u_hi;
+  uint32_t u_hi = seed_lo * 5u + neg_shift;
+  u_hi = seed_hi * 0xE66Du + u_hi;
 
   uint32_t step_hi;
   asm("{ .reg .u32 tmp;\n\t"
-      "  mad.lo.cc.u32 tmp, %1, %2, %3;\n\t"
-      "  madc.hi.u32   %0,  %1, %2, %4; }"
+      "  mad.lo.cc.u32 tmp, %1, %2, 11;\n\t"
+      "  madc.hi.u32   %0,  %1, %2, %3; }"
       : "=r"(step_hi)
-      : "r"(seed_lo), "r"(0xDEECE66Du), "r"(11u), "r"(u_hi));
+      : "r"(seed_lo), "r"(0xDEECE66Du), "r"(u_hi));
+  return step_hi;
+}
 
-  return int((step_hi >> 14u) & 3u);
+// Factored 5-IMAD Y hash:
+//   p = lx * (42317861 * lx + 11 + 2^32 * K1) + 2^32 * K0  (mod 2^64)
+__device__ __forceinline__ uint32_t rotation_y_lh_raw(
+    uint32_t xz_lo, uint32_t K1, uint32_t K0, uint32_t y_lo, uint32_t neg_shift) {
+  uint32_t lx = xz_lo ^ y_lo;
+  uint32_t a_lo, a_hi;
+  asm("mad.lo.cc.u32 %0, %2, %3, 11;\n\t"
+      "madc.hi.u32   %1, %2, %3, %4;"
+      : "=r"(a_lo), "=r"(a_hi)
+      : "r"(lx), "r"(42317861u), "r"(K1));
+  uint32_t t_hi = a_hi * lx + K0;
+  uint32_t p_lo = lx * a_lo;
+  uint32_t p_hi = __umulhi(lx, a_lo) + t_hi;
+  return finish_p_to_step_hi(p_lo, p_hi, neg_shift);
+}
+
+__device__ __forceinline__ int rotation_y_lh(uint32_t xz_lo, uint32_t K1, uint32_t K0, uint32_t y_lo) {
+  return int((rotation_y_lh_raw(xz_lo, K1, K0, y_lo, 0u) >> 14u) & 3u);
 }
 
 __device__ __forceinline__ int rotation_y_u32(uint32_t xz_lo, uint32_t xz_hi, int32_t y) {
@@ -68,18 +76,50 @@ __device__ __forceinline__ int rotation_y_u32(uint32_t xz_lo, uint32_t xz_hi, in
   return rotation_y_lh(xz_lo, 84635722u * ly, 11u * ly, uint32_t(y));
 }
 
-__device__ __forceinline__ void rotation_y4_lh(uint32_t xz_lo, uint32_t K1, uint32_t K0, uint32_t base_y,
-                                               int& r0, int& r1, int& r2, int& r3) {
-  r0 = rotation_y_lh(xz_lo, K1, K0, base_y);
-  r1 = rotation_y_lh(xz_lo, K1, K0, base_y + 1u);
-  r2 = rotation_y_lh(xz_lo, K1, K0, base_y + 2u);
-  r3 = rotation_y_lh(xz_lo, K1, K0, base_y + 3u);
+// 2nd-order finite-difference initialization for consecutive lx = B, B+1, ..., B+(2^k - 1).
+// For any 2^k-aligned y_base, {xz_lo ^ (y_base + i)} == {B + j} where B = (xz_lo ^ y_base) & ~(2^k-1),
+// so B + j never overflows 32 bits and each step advances p(B+j) with 4 IADD3s and 0 IMADs.
+__device__ __forceinline__ void fd_init(
+    uint32_t B, uint32_t K1, uint32_t K0,
+    uint32_t& p_lo, uint32_t& p_hi, uint32_t& d_lo, uint32_t& d_hi) {
+  uint32_t a_lo, a_hi;
+  asm("mad.lo.cc.u32 %0, %2, %3, 11;\n\t"
+      "madc.hi.u32   %1, %2, %3, %4;"
+      : "=r"(a_lo), "=r"(a_hi)
+      : "r"(B), "r"(42317861u), "r"(K1));
+  uint32_t t_hi = a_hi * B + K0;
+  p_lo = B * a_lo;
+  p_hi = __umulhi(B, a_lo) + t_hi;
+  asm("mad.lo.cc.u32 %0, %2, %3, %4;\n\t"
+      "madc.hi.u32   %1, %2, %3, %5;"
+      : "=r"(d_lo), "=r"(d_hi)
+      : "r"(B), "r"(84635722u), "r"(42317872u), "r"(K1));
 }
 
-__device__ __forceinline__ void rotation_y2_lh(uint32_t xz_lo, uint32_t K1, uint32_t K0, uint32_t base_y,
-                                               int& r0, int& r1) {
-  r0 = rotation_y_lh(xz_lo, K1, K0, base_y);
-  r1 = rotation_y_lh(xz_lo, K1, K0, base_y + 1u);
+__device__ __forceinline__ void fd_step_p(uint32_t& p_lo, uint32_t& p_hi, uint32_t d_lo, uint32_t d_hi) {
+  asm("add.cc.u32 %0, %0, %2;\n\t"
+      "addc.u32   %1, %1, %3;"
+      : "+r"(p_lo), "+r"(p_hi)
+      : "r"(d_lo), "r"(d_hi));
+}
+
+__device__ __forceinline__ void fd_step_d(uint32_t& d_lo, uint32_t& d_hi) {
+  asm("add.cc.u32 %0, %0, %2;\n\t"
+      "addc.u32   %1, %1, 0;"
+      : "+r"(d_lo), "+r"(d_hi)
+      : "r"(84635722u));
+}
+
+// Warp-wide exclusive prefix sum for small per-lane counts; returns total across all 32 lanes.
+__device__ __forceinline__ uint32_t warp_excl_scan(uint32_t val, uint32_t lane, uint32_t& excl) {
+  uint32_t x = val;
+  #pragma unroll
+  for (uint32_t offset = 1u; offset < 32u; offset <<= 1u) {
+    uint32_t up = __shfl_up_sync(0xFFFFFFFFu, x, offset);
+    if (lane >= offset) x += up;
+  }
+  excl = x - val;
+  return __shfl_sync(0xFFFFFFFFu, x, 31);
 }
 
 __device__ __forceinline__ int texture(int32_t bx, int32_t by, int32_t bz, int side) {
@@ -99,197 +139,163 @@ __device__ __forceinline__ PackedBlock load_packed_global(const PackedBlock* __r
   return PackedBlock{v.x, v.y, v.z, uint32_t(v.w)};
 }
 
-static constexpr uint32_t SHARED_CAP = 64u;
+static constexpr uint32_t SHARED_CAP = 16u;
 
 struct B12RegsSingle {
-  uint32_t xz1_lo, xz1_hi;
+  uint32_t xz1_lo, xz1_hi, k1_1, k0_1;
   int32_t b1_y;
-  uint32_t b1_meta;
-  uint32_t xz2_lo, xz2_hi;
+  uint32_t b1_neg_shift, b1_mask_shift;
+  uint32_t xz2_lo, xz2_hi, k1_2, k0_2;
   int32_t b2_y;
-  uint32_t b2_meta;
+  uint32_t b2_neg_shift, b2_mask_shift;
 };
 
-__device__ __forceinline__ void select_xz1_u32(
-    int n,
-    uint32_t x0l, uint32_t x0h, uint32_t x1l, uint32_t x1h,
-    uint32_t x2l, uint32_t x2h, uint32_t x3l, uint32_t x3h,
-    uint32_t& out_lo, uint32_t& out_hi) {
-  out_lo = (n == 0) ? x0l : (n == 1) ? x1l : (n == 2) ? x2l : x3l;
-  out_hi = (n == 0) ? x0h : (n == 1) ? x1h : (n == 2) ? x2h : x3h;
+// Cold tail verifier for Mode == 0 (uniform north -> constant cache broadcast, zero SMEM).
+__device__ __noinline__ bool check_tail_const(const PackedBlock* __restrict__ blocks,
+                                              uint32_t start_i, uint32_t nb, int north,
+                                              int32_t x, int32_t y, int32_t z) {
+  #pragma unroll 1
+  for (uint32_t i = start_i; i < nb; i++) {
+    PackedBlock b = load_packed_global(blocks, north, i, nb);
+    uint32_t xz_lo, xz_hi;
+    rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz_lo, xz_hi);
+    uint32_t y_b = add_i32_wrap(y, b.y);
+    uint32_t ly = xz_hi ^ uint32_t(int32_t(y_b) >> 31);
+    uint32_t neg_s = (uint32_t(-(int32_t(b.meta & 3u))) & 3u) << 14u;
+    uint32_t m_s = (b.meta >> 8u) << 14u;
+    if ((rotation_y_lh_raw(xz_lo, 84635722u * ly, 11u * ly, y_b, neg_s) & m_s) != 0u) return false;
+  }
+  return true;
 }
 
-__device__ __forceinline__ bool check_tail_shared(const PackedBlock* s_row,
-                                                  const PackedBlock* __restrict__ blocks,
-                                                  uint32_t start_i, uint32_t nb, int north,
-                                                  int32_t x, int32_t y, int32_t z) {
+// Cold tail verifier for Mode == 1, 2 (per-lane north -> shared memory for first 16 blocks).
+__device__ __noinline__ bool check_tail_shared(const PackedBlock* s_row,
+                                               const PackedBlock* __restrict__ blocks,
+                                               uint32_t start_i, uint32_t nb, int north,
+                                               int32_t x, int32_t y, int32_t z) {
   uint32_t s_end = nb < SHARED_CAP ? nb : SHARED_CAP;
   #pragma unroll 1
   for (uint32_t i = start_i; i < s_end; i++) {
     PackedBlock b = s_row[i];
     uint32_t xz_lo, xz_hi;
     rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz_lo, xz_hi);
-    uint32_t r = uint32_t(rotation_y_u32(xz_lo, xz_hi, int32_t(add_i32_wrap(y, b.y))));
-    if ((r & (b.meta >> 8u)) != (b.meta & 3u)) return false;
+    uint32_t y_b = add_i32_wrap(y, b.y);
+    uint32_t ly = xz_hi ^ uint32_t(int32_t(y_b) >> 31);
+    uint32_t neg_s = (uint32_t(-(int32_t(b.meta & 3u))) & 3u) << 14u;
+    uint32_t m_s = (b.meta >> 8u) << 14u;
+    if ((rotation_y_lh_raw(xz_lo, 84635722u * ly, 11u * ly, y_b, neg_s) & m_s) != 0u) return false;
   }
   for (uint32_t i = SHARED_CAP; i < nb; i++) {
     PackedBlock b = load_packed_global(blocks, north, i, nb);
     uint32_t xz_lo, xz_hi;
     rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz_lo, xz_hi);
-    uint32_t r = uint32_t(rotation_y_u32(xz_lo, xz_hi, int32_t(add_i32_wrap(y, b.y))));
-    if ((r & (b.meta >> 8u)) != (b.meta & 3u)) return false;
+    uint32_t y_b = add_i32_wrap(y, b.y);
+    uint32_t ly = xz_hi ^ uint32_t(int32_t(y_b) >> 31);
+    uint32_t neg_s = (uint32_t(-(int32_t(b.meta & 3u))) & 3u) << 14u;
+    uint32_t m_s = (b.meta >> 8u) << 14u;
+    if ((rotation_y_lh_raw(xz_lo, 84635722u * ly, 11u * ly, y_b, neg_s) & m_s) != 0u) return false;
   }
   return true;
 }
 
-__device__ __forceinline__ bool check_single(const PackedBlock* s_row,
-                                             const PackedBlock* __restrict__ blocks,
-                                             uint32_t nb, int single_n,
-                                             int32_t x, int32_t y, int32_t z,
-                                             const B12RegsSingle& regs) {
-  if (nb > 1u) {
-    uint32_t r1 = uint32_t(rotation_y_u32(regs.xz1_lo, regs.xz1_hi, int32_t(add_i32_wrap(y, regs.b1_y))));
-    if ((r1 & (regs.b1_meta >> 8u)) != (regs.b1_meta & 3u)) return false;
-    if (nb > 2u) {
-      uint32_t r2 = uint32_t(rotation_y_u32(regs.xz2_lo, regs.xz2_hi, int32_t(add_i32_wrap(y, regs.b2_y))));
-      if ((r2 & (regs.b2_meta >> 8u)) != (regs.b2_meta & 3u)) return false;
-      if (nb > 3u) {
-        return check_tail_shared(s_row, blocks, 3u, nb, single_n, x, y, z);
-      }
-    }
-  }
-  return true;
-}
-
-template <bool AnchorSide>
-__device__ __forceinline__ void sweep_segment_single(
-    uint32_t seg_begin, uint32_t seg_end,
+template <bool NonNegY>
+__device__ __noinline__ void sweep_segment_single_scalar(
+    uint32_t seg_begin, uint32_t seg_end, bool anchor_side,
     uint32_t xz0_lo, uint32_t K1, uint32_t K0,
     int32_t x, int32_t ymin, int32_t z,
-    uint32_t task_base_idx, int single_n, int target_r0,
-    const PackedBlock* s_row,
+    uint32_t task_base_idx, int single_n, uint32_t neg_r0_shift,
     const PackedBlock* __restrict__ blocks, uint32_t nb,
     const B12RegsSingle& regs,
     uint32_t* results, uint32_t* result_count) {
-  uint32_t yy = seg_begin;
-  for (; yy + 3u < seg_end; yy += 4u) {
+  uint32_t target_mask = anchor_side ? 0x4000u : 0xC000u;
+  for (uint32_t yy = seg_begin; yy < seg_end; yy++) {
     uint32_t y0_u = uint32_t(ymin) + yy;
-    int r0, r1, r2, r3;
-    rotation_y4_lh(xz0_lo, K1, K0, y0_u, r0, r1, r2, r3);
-    bool m0 = AnchorSide ? ((r0 & 1) == target_r0) : (r0 == target_r0);
-    bool m1 = AnchorSide ? ((r1 & 1) == target_r0) : (r1 == target_r0);
-    bool m2 = AnchorSide ? ((r2 & 1) == target_r0) : (r2 == target_r0);
-    bool m3 = AnchorSide ? ((r3 & 1) == target_r0) : (r3 == target_r0);
-    uint32_t hits = (m0 ? 1u : 0u) | (m1 ? 2u : 0u) | (m2 ? 4u : 0u) | (m3 ? 8u : 0u);
-    while (hits) {
-      uint32_t k = uint32_t(__ffs(int(hits)) - 1);
-      hits &= hits - 1u;
-      if (check_single(s_row, blocks, nb, single_n, x, int32_t(y0_u + k), z, regs))
-        results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy + k);
+    if ((rotation_y_lh_raw(xz0_lo, K1, K0, y0_u, neg_r0_shift) & target_mask) != 0u) continue;
+    int32_t yk = int32_t(y0_u);
+    bool ok = true;
+    if (nb > 1u) {
+      uint32_t y1 = add_i32_wrap(yk, regs.b1_y);
+      uint32_t k1, k0;
+      if constexpr (NonNegY) {
+        k1 = regs.k1_1; k0 = regs.k0_1;
+      } else {
+        uint32_t ly1 = regs.xz1_hi ^ uint32_t(int32_t(y1) >> 31);
+        k1 = 84635722u * ly1; k0 = 11u * ly1;
+      }
+      if ((rotation_y_lh_raw(regs.xz1_lo, k1, k0, y1, regs.b1_neg_shift) & regs.b1_mask_shift) != 0u) ok = false;
+      else if (nb > 2u) {
+        uint32_t y2 = add_i32_wrap(yk, regs.b2_y);
+        uint32_t k1_2, k0_2;
+        if constexpr (NonNegY) {
+          k1_2 = regs.k1_2; k0_2 = regs.k0_2;
+        } else {
+          uint32_t ly2 = regs.xz2_hi ^ uint32_t(int32_t(y2) >> 31);
+          k1_2 = 84635722u * ly2; k0_2 = 11u * ly2;
+        }
+        if ((rotation_y_lh_raw(regs.xz2_lo, k1_2, k0_2, y2, regs.b2_neg_shift) & regs.b2_mask_shift) != 0u) ok = false;
+        else if (nb > 3u) ok = check_tail_const(blocks, 3u, nb, single_n, x, yk, z);
+      }
     }
-  }
-  for (; yy < seg_end; yy++) {
-    uint32_t y0_u = uint32_t(ymin) + yy;
-    int r0 = rotation_y_lh(xz0_lo, K1, K0, y0_u);
-    bool m0 = AnchorSide ? ((r0 & 1) == target_r0) : (r0 == target_r0);
-    if (m0 && check_single(s_row, blocks, nb, single_n, x, int32_t(y0_u), z, regs))
-      results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy);
+    if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (task_base_idx + yy);
   }
 }
 
-__device__ __forceinline__ bool check_multi_hit(
-    const PackedBlock (*s_blocks)[SHARED_CAP],
-    const PackedBlock* __restrict__ blocks, uint32_t nb,
-    int n, int32_t x, int32_t y, int32_t z,
-    uint32_t xz1_lo0, uint32_t xz1_hi0, uint32_t xz1_lo1, uint32_t xz1_hi1,
-    uint32_t xz1_lo2, uint32_t xz1_hi2, uint32_t xz1_lo3, uint32_t xz1_hi3,
-    int32_t b1_y, uint32_t b1_r_pack, uint32_t b1_mask) {
-  if (nb > 1u) {
-    uint32_t xl, xh;
-    select_xz1_u32(n, xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3, xl, xh);
-    uint32_t r1 = uint32_t(rotation_y_u32(xl, xh, int32_t(add_i32_wrap(y, b1_y))));
-    uint32_t exp_r1 = (b1_r_pack >> (uint32_t(n) * 2u)) & 3u;
-    if ((r1 & b1_mask) != exp_r1) return false;
-    if (nb > 2u) {
-      return check_tail_shared(s_blocks[n], blocks, 2u, nb, n, x, y, z);
-    }
-  }
-  return true;
-}
-
-template <bool AnchorSide, bool AllFour>
-__device__ __forceinline__ void sweep_segment_multi(
+template <bool AnchorSide, bool AllFour, bool NonNegY>
+__device__ __noinline__ void sweep_segment_multi_scalar(
     uint32_t seg_begin, uint32_t seg_end,
     uint32_t xz0_lo, uint32_t K1, uint32_t K0,
     int32_t x, int32_t ymin, int32_t z,
-    uint32_t task_base_idx, uint32_t north_mask, int32_t rA,
-    const PackedBlock (*s_blocks)[SHARED_CAP],
+    uint32_t task_base_idx, uint32_t north_mask, uint32_t neg_rA_shift,
+    const PackedBlock* s_blocks_flat,
     const PackedBlock* __restrict__ blocks, uint32_t nb,
-    uint32_t xz1_lo0, uint32_t xz1_hi0, uint32_t xz1_lo1, uint32_t xz1_hi1,
-    uint32_t xz1_lo2, uint32_t xz1_hi2, uint32_t xz1_lo3, uint32_t xz1_hi3,
-    int32_t b1_y, uint32_t b1_r_pack, uint32_t b1_mask,
+    const uint32_t* lane_xz1,
+    int32_t b1_y, uint32_t b1_neg_base_shift, uint32_t b1_mask_shift,
     uint32_t* results, uint32_t* result_count) {
-  constexpr uint32_t bit_pat = AnchorSide ? 5u : 1u;
-  uint32_t yy = seg_begin;
-  for (; yy + 3u < seg_end; yy += 4u) {
+  for (uint32_t yy = seg_begin; yy < seg_end; yy++) {
     uint32_t y0_u = uint32_t(ymin) + yy;
-    int r[4];
-    rotation_y4_lh(xz0_lo, K1, K0, y0_u, r[0], r[1], r[2], r[3]);
-    int n0 = AnchorSide ? ((r[0] - (rA & 1)) & 1) : ((r[0] - rA) & 3);
-    int n1 = AnchorSide ? ((r[1] - (rA & 1)) & 1) : ((r[1] - rA) & 3);
-    int n2 = AnchorSide ? ((r[2] - (rA & 1)) & 1) : ((r[2] - rA) & 3);
-    int n3 = AnchorSide ? ((r[3] - (rA & 1)) & 1) : ((r[3] - rA) & 3);
-    uint32_t hits = 0xFu;
-    if constexpr (!AllFour) {
-      bool m0 = (north_mask & (bit_pat << n0)) != 0u;
-      bool m1 = (north_mask & (bit_pat << n1)) != 0u;
-      bool m2 = (north_mask & (bit_pat << n2)) != 0u;
-      bool m3 = (north_mask & (bit_pat << n3)) != 0u;
-      hits = (m0 ? 1u : 0u) | (m1 ? 2u : 0u) | (m2 ? 4u : 0u) | (m3 ? 8u : 0u);
-      if (!hits) continue;
-    }
-    int ns[4] = {n0, n1, n2, n3};
-    #pragma unroll
-    for (uint32_t k = 0; k < 4u; k++) {
-      if (!AllFour && ((hits & (1u << k)) == 0u)) continue;
-      int nk = ns[k];
-      int32_t yk = int32_t(y0_u + k);
-      if ((AllFour || (north_mask & (1u << nk))) &&
-          check_multi_hit(s_blocks, blocks, nb, nk, x, yk, z,
-                          xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-                          b1_y, b1_r_pack, b1_mask)) {
-        results[atomicAdd(result_count, 1u)] = (uint32_t(nk) << 30u) | (task_base_idx + yy + k);
-      }
-      if (AnchorSide && (AllFour || (north_mask & (1u << (nk + 2)))) &&
-          check_multi_hit(s_blocks, blocks, nb, nk + 2, x, yk, z,
-                          xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-                          b1_y, b1_r_pack, b1_mask)) {
-        results[atomicAdd(result_count, 1u)] = (uint32_t(nk + 2) << 30u) | (task_base_idx + yy + k);
-      }
-    }
-  }
-  for (; yy < seg_end; yy++) {
-    uint32_t y0_u = uint32_t(ymin) + yy;
-    int r0 = rotation_y_lh(xz0_lo, K1, K0, y0_u);
-    int nk = AnchorSide ? ((r0 - (rA & 1)) & 1) : ((r0 - rA) & 3);
+    uint32_t sh0 = rotation_y_lh_raw(xz0_lo, K1, K0, y0_u, neg_rA_shift);
+    int nk = AnchorSide ? int((sh0 >> 14u) & 1u) : int((sh0 >> 14u) & 3u);
     int32_t yk = int32_t(y0_u);
-    if ((AllFour || (north_mask & (1u << nk))) &&
-        check_multi_hit(s_blocks, blocks, nb, nk, x, yk, z,
-                        xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-                        b1_y, b1_r_pack, b1_mask)) {
-      results[atomicAdd(result_count, 1u)] = (uint32_t(nk) << 30u) | (task_base_idx + yy);
-    }
-    if (AnchorSide && (AllFour || (north_mask & (1u << (nk + 2)))) &&
-        check_multi_hit(s_blocks, blocks, nb, nk + 2, x, yk, z,
-                        xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-                        b1_y, b1_r_pack, b1_mask)) {
-      results[atomicAdd(result_count, 1u)] = (uint32_t(nk + 2) << 30u) | (task_base_idx + yy);
+    for (int step = 0; step < (AnchorSide ? 2 : 1); step++) {
+      int n = nk + step * 2;
+      if (!AllFour && ((north_mask & (1u << n)) == 0u)) continue;
+      bool ok = true;
+      if (nb > 1u) {
+        uint32_t off = uint32_t(n) << 5u;
+        uint32_t xl = lane_xz1[off];
+        uint32_t y1 = add_i32_wrap(yk, b1_y);
+        uint32_t k1, k0;
+        if constexpr (NonNegY) {
+          k1 = lane_xz1[off + 128u];
+          k0 = lane_xz1[off + 256u];
+        } else {
+          uint32_t ly1 = lane_xz1[off + 128u] ^ uint32_t(int32_t(y1) >> 31);
+          k1 = 84635722u * ly1;
+          k0 = 11u * ly1;
+        }
+        uint32_t sh1 = rotation_y_lh_raw(xl, k1, k0, y1, b1_neg_base_shift);
+        if (((sh0 ^ sh1) & b1_mask_shift) != 0u) ok = false;
+        else if (nb > 2u) ok = check_tail_shared(s_blocks_flat + uint32_t(n) * SHARED_CAP, blocks, 2u, nb, n, x, yk, z);
+      }
+      if (ok) results[atomicAdd(result_count, 1u)] = (uint32_t(n) << 30u) | (task_base_idx + yy);
     }
   }
 }
 
+static uint32_t kernel_smem_bytes(int mode, uint32_t threads) {
+  uint32_t warps = threads >> 5u;
+  if (mode == 0) {
+    // Mode 0: zero s_blocks (uses constant cache broadcast directly!)
+    // Per warp: s_q1[288] + s_q2[64] + s_q3[64] = 416 u32 = 1664 B/warp
+    return warps * 416u * 4u;
+  }
+  // Mode 1/2: s_blocks[4][16] (1024 B = 256 u32)
+  // Per warp: s_xz1 (384 u32) + s_q2[288] + s_q3[64] = 736 u32 = 2944 B/warp
+  return 1024u + warps * 736u * 4u;
+}
+
 template <int Mode, bool AnchorSide, bool NonNegY, uint32_t FixedItems>
-__global__ void __launch_bounds__(512, 2) search_fast_kernel(
+__global__ void __launch_bounds__(256, 4) search_fast_kernel(
     const PackedBlock* __restrict__ blocks, uint32_t nb,
     uint32_t* results, uint32_t* result_count,
     uint32_t count, uint32_t runtime_items,
@@ -297,29 +303,32 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
     uint32_t ny, uint32_t nz, uint32_t nz_inv,
     uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase,
     uint32_t north_mask, int32_t rA, int single_n, uint32_t zero_yy) {
-  __shared__ PackedBlock s_blocks[Mode == 0 ? 1 : 4][SHARED_CAP];
+  extern __shared__ uint32_t dyn_smem[];
   constexpr bool AllFour = (Mode == 2);
-  uint32_t s_nb = nb < SHARED_CAP ? nb : SHARED_CAP;
-  if constexpr (Mode == 0) {
-    for (uint32_t idx = threadIdx.x; idx < s_nb; idx += blockDim.x) {
-      s_blocks[0][idx] = load_packed_global(blocks, single_n, idx, nb);
-    }
-  } else {
+  PackedBlock* s_blocks_flat = reinterpret_cast<PackedBlock*>(dyn_smem);
+  const uint32_t warp_id = threadIdx.x >> 5u;
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t lanemask_lt = (1u << lane) - 1u;
+
+  if constexpr (Mode != 0) {
+    uint32_t s_nb = nb < SHARED_CAP ? nb : SHARED_CAP;
     for (int n = 0; n < 4; n++) {
       if (AllFour || (north_mask & (1u << n))) {
         for (uint32_t idx = threadIdx.x; idx < s_nb; idx += blockDim.x) {
-          s_blocks[n][idx] = load_packed_global(blocks, n, idx, nb);
+          s_blocks_flat[uint32_t(n) * SHARED_CAP + idx] = load_packed_global(blocks, n, idx, nb);
         }
       }
     }
+    __syncthreads();
   }
-  __syncthreads();
 
   const uint32_t items = FixedItems ? FixedItems : runtime_items;
-  uint32_t first = (blockIdx.x * blockDim.x + threadIdx.x) * items;
-  if (first >= tasks) return;
+  const uint32_t warp_first = (blockIdx.x * blockDim.x + (threadIdx.x & ~31u)) * items;
+  if (warp_first >= tasks) return;
 
-  uint32_t zid = first + zoff;
+  const uint32_t first = (blockIdx.x * blockDim.x + threadIdx.x) * items;
+
+  uint32_t zid = (first < tasks) ? (first + zoff) : zoff;
   uint32_t q = (nz == 1u) ? zid : __umulhi(zid, nz_inv);
   uint32_t zz = zid - q * nz;
   if (zz >= nz) {
@@ -330,145 +339,534 @@ __global__ void __launch_bounds__(512, 2) search_fast_kernel(
   int32_t x = int32_t(uint32_t(xbase) + q);
 
   const int target_r0 = AnchorSide ? ((rA + single_n) & 1) : ((rA + single_n) & 3);
+  const uint32_t neg_r0_shift = (uint32_t(-target_r0) & 3u) << 14u;
+  const uint32_t neg_rA_shift = (uint32_t(-rA) & 3u) << 14u;
+
+  uint32_t* warp_mem = (Mode == 0)
+      ? (dyn_smem + warp_id * 416u)
+      : (dyn_smem + 256u + warp_id * 736u);
+
+  int32_t b1_y = 0, b2_y = 0;
+  uint32_t b1_mask_shift = 0u, b1_neg_base_shift = 0u, b1_neg_single = 0u;
+  uint32_t b2_mask_shift = 0u, b2_neg_single = 0u;
+
+  if (nb > 1u) {
+    if constexpr (Mode == 0) {
+      PackedBlock sb1 = load_packed_global(blocks, single_n, 1u, nb);
+      b1_y = sb1.y;
+      b1_mask_shift = (sb1.meta >> 8u) << 14u;
+      b1_neg_single = (uint32_t(-(int32_t(sb1.meta & 3u))) & 3u) << 14u;
+      if (nb > 2u) {
+        PackedBlock sb2 = load_packed_global(blocks, single_n, 2u, nb);
+        b2_y = sb2.y;
+        b2_mask_shift = (sb2.meta >> 8u) << 14u;
+        b2_neg_single = (uint32_t(-(int32_t(sb2.meta & 3u))) & 3u) << 14u;
+      }
+    } else {
+      int first_n = AllFour ? 0 : (__ffs(int(north_mask)) - 1);
+      PackedBlock sb1 = s_blocks_flat[uint32_t(first_n) * SHARED_CAP + 1u];
+      b1_y = sb1.y;
+      b1_mask_shift = (sb1.meta >> 8u) << 14u;
+      uint32_t r1_base = uint32_t(int32_t(sb1.meta & 3u) - first_n) & 3u;
+      b1_neg_base_shift = (uint32_t(-int32_t(r1_base)) & 3u) << 14u;
+    }
+  }
 
   #pragma unroll 1
   for (uint32_t j = 0; j < items; j++) {
     uint32_t task = first + j;
-    if (task >= tasks) break;
+    bool lane_valid = (task < tasks);
+    if (!__any_sync(0xFFFFFFFFu, lane_valid)) break;
 
-    uint32_t begin = (task == 0u) ? yoff : 0u;
-    uint32_t rem = count + yoff - task * ny;
-    uint32_t end = rem < ny ? rem : ny;
-    uint32_t task_base_idx = task * ny - yoff;
+    uint32_t begin = 0u, end = 0u, task_base_idx = 0u;
+    if (lane_valid) {
+      begin = (task == 0u) ? yoff : 0u;
+      uint32_t rem = count + yoff - task * ny;
+      end = rem < ny ? rem : ny;
+      task_base_idx = task * ny - yoff;
+    }
 
-    uint32_t xz0_lo, xz0_hi;
-    rotation_xz_u32(x, z, xz0_lo, xz0_hi);
-    uint32_t neg_end = end < zero_yy ? end : zero_yy;
-    uint32_t pos_begin = begin > zero_yy ? begin : zero_yy;
+    uint32_t xz0_lo = 0u, xz0_hi = 0u;
+    if (lane_valid) {
+      rotation_xz_u32(x, z, xz0_lo, xz0_hi);
+    }
+
+    bool full_warp = (nb >= 4u) && __all_sync(0xFFFFFFFFu, lane_valid && begin == 0u && end == ny);
 
     if constexpr (Mode == 0) {
+      uint32_t* s_q1 = warp_mem;          // 288 u32 (31 + 256 max)
+      uint32_t* s_q2 = warp_mem + 288u;   // 64 u32
+      uint32_t* s_q3 = warp_mem + 352u;   // 64 u32
+
       B12RegsSingle sregs{};
-      if (nb > 1u) {
-        PackedBlock sb1 = s_blocks[0][1];
-        sregs.b1_y = sb1.y;
-        sregs.b1_meta = sb1.meta;
+      sregs.b1_y = b1_y;
+      sregs.b1_neg_shift = b1_neg_single;
+      sregs.b1_mask_shift = b1_mask_shift;
+      sregs.b2_y = b2_y;
+      sregs.b2_neg_shift = b2_neg_single;
+      sregs.b2_mask_shift = b2_mask_shift;
+
+      if (lane_valid && nb > 1u) {
+        PackedBlock sb1 = load_packed_global(blocks, single_n, 1u, nb);
         if (sb1.x == 0 && sb1.z == 0) {
           sregs.xz1_lo = xz0_lo;
           sregs.xz1_hi = xz0_hi;
         } else {
           rotation_xz_u32(int32_t(add_i32_wrap(x, sb1.x)), int32_t(add_i32_wrap(z, sb1.z)), sregs.xz1_lo, sregs.xz1_hi);
         }
+        if constexpr (NonNegY) {
+          sregs.k1_1 = 84635722u * sregs.xz1_hi;
+          sregs.k0_1 = 11u * sregs.xz1_hi;
+        }
       }
-      if (nb > 2u) {
-        PackedBlock sb2 = s_blocks[0][2];
-        sregs.b2_y = sb2.y;
-        sregs.b2_meta = sb2.meta;
+      if (lane_valid && nb > 2u) {
+        PackedBlock sb2 = load_packed_global(blocks, single_n, 2u, nb);
         if (sb2.x == 0 && sb2.z == 0) {
           sregs.xz2_lo = xz0_lo;
           sregs.xz2_hi = xz0_hi;
         } else {
           rotation_xz_u32(int32_t(add_i32_wrap(x, sb2.x)), int32_t(add_i32_wrap(z, sb2.z)), sregs.xz2_lo, sregs.xz2_hi);
         }
+        if constexpr (NonNegY) {
+          sregs.k1_2 = 84635722u * sregs.xz2_hi;
+          sregs.k0_2 = 11u * sregs.xz2_hi;
+        }
       }
 
-      if constexpr (NonNegY) {
-        uint32_t ly_pos = xz0_hi;
-        sweep_segment_single<AnchorSide>(
-            begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
-            x, ymin, z, task_base_idx, single_n, target_r0,
-            s_blocks[0], blocks, nb, sregs, results, result_count);
-      } else {
-        if (begin < neg_end) {
-          uint32_t ly_neg = ~xz0_hi;
-          sweep_segment_single<AnchorSide>(
-              begin, neg_end, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
-              x, ymin, z, task_base_idx, single_n, target_r0,
-              s_blocks[0], blocks, nb, sregs, results, result_count);
+      if (full_warp) {
+        uint32_t q1_cnt = 0u, q2_cnt = 0u, q3_cnt = 0u;
+        constexpr uint32_t target_mask = AnchorSide ? 0x4000u : 0xC000u;
+
+        auto flush_q3 = [&](uint32_t take) {
+          q3_cnt -= take;
+          bool active = (lane < take);
+          uint32_t pkt = active ? s_q3[q3_cnt + lane] : 0u;
+          uint32_t src = (pkt >> 12u) & 31u;
+          uint32_t pyy = pkt & 0xFFFu;
+          int32_t cx = __shfl_sync(0xFFFFFFFFu, x, src);
+          int32_t cz = __shfl_sync(0xFFFFFFFFu, z, src);
+          uint32_t cbase = __shfl_sync(0xFFFFFFFFu, task_base_idx, src);
+          if (active && check_tail_const(blocks, 3u, nb, single_n, cx, int32_t(uint32_t(ymin) + pyy), cz)) {
+            results[atomicAdd(result_count, 1u)] = (uint32_t(single_n) << 30u) | (cbase + pyy);
+          }
+        };
+
+        auto flush_q2 = [&](uint32_t take) {
+          q2_cnt -= take;
+          bool active = (lane < take);
+          uint32_t pkt = active ? s_q2[q2_cnt + lane] : 0u;
+          uint32_t src = (pkt >> 12u) & 31u;
+          uint32_t pyy = pkt & 0xFFFu;
+          uint32_t c_lo = __shfl_sync(0xFFFFFFFFu, sregs.xz2_lo, src);
+          uint32_t c_k1, c_k0;
+          if constexpr (NonNegY) {
+            c_k1 = __shfl_sync(0xFFFFFFFFu, sregs.k1_2, src);
+            c_k0 = __shfl_sync(0xFFFFFFFFu, sregs.k0_2, src);
+          } else {
+            uint32_t c_hi = __shfl_sync(0xFFFFFFFFu, sregs.xz2_hi, src);
+            uint32_t y2_tmp = uint32_t(ymin) + pyy + uint32_t(b2_y);
+            uint32_t ly2 = c_hi ^ uint32_t(int32_t(y2_tmp) >> 31);
+            c_k1 = 84635722u * ly2;
+            c_k0 = 11u * ly2;
+          }
+          bool pass2 = false;
+          if (active) {
+            uint32_t y2 = uint32_t(ymin) + pyy + uint32_t(b2_y);
+            pass2 = (rotation_y_lh_raw(c_lo, c_k1, c_k0, y2, b2_neg_single) & b2_mask_shift) == 0u;
+          }
+          uint32_t m2 = __ballot_sync(0xFFFFFFFFu, pass2);
+          if (m2) {
+            uint32_t rank = __popc(m2 & lanemask_lt);
+            if (pass2) s_q3[q3_cnt + rank] = pkt;
+            q3_cnt += __popc(m2);
+            if (q3_cnt >= 32u) flush_q3(32u);
+          }
+        };
+
+        auto flush_q1 = [&](uint32_t take) {
+          q1_cnt -= take;
+          bool active = (lane < take);
+          uint32_t pkt = active ? s_q1[q1_cnt + lane] : 0u;
+          uint32_t src = (pkt >> 12u) & 31u;
+          uint32_t pyy = pkt & 0xFFFu;
+          uint32_t c_lo = __shfl_sync(0xFFFFFFFFu, sregs.xz1_lo, src);
+          uint32_t c_k1, c_k0;
+          if constexpr (NonNegY) {
+            c_k1 = __shfl_sync(0xFFFFFFFFu, sregs.k1_1, src);
+            c_k0 = __shfl_sync(0xFFFFFFFFu, sregs.k0_1, src);
+          } else {
+            uint32_t c_hi = __shfl_sync(0xFFFFFFFFu, sregs.xz1_hi, src);
+            uint32_t y1_tmp = uint32_t(ymin) + pyy + uint32_t(b1_y);
+            uint32_t ly1 = c_hi ^ uint32_t(int32_t(y1_tmp) >> 31);
+            c_k1 = 84635722u * ly1;
+            c_k0 = 11u * ly1;
+          }
+          bool pass1 = false;
+          if (active) {
+            uint32_t y1 = uint32_t(ymin) + pyy + uint32_t(b1_y);
+            pass1 = (rotation_y_lh_raw(c_lo, c_k1, c_k0, y1, b1_neg_single) & b1_mask_shift) == 0u;
+          }
+          uint32_t m1 = __ballot_sync(0xFFFFFFFFu, pass1);
+          if (m1) {
+            uint32_t rank = __popc(m1 & lanemask_lt);
+            if (pass1) s_q2[q2_cnt + rank] = pkt;
+            q2_cnt += __popc(m1);
+            if (q2_cnt >= 32u) flush_q2(32u);
+          }
+        };
+
+        auto push_b0_single = [&](bool hit, uint32_t yy_hit) {
+          uint32_t bmask = __ballot_sync(0xFFFFFFFFu, hit);
+          if (bmask) {
+            uint32_t rank = __popc(bmask & lanemask_lt);
+            if (hit) s_q1[q1_cnt + rank] = yy_hit | (lane << 12u);
+            q1_cnt += __popc(bmask);
+            if (q1_cnt >= 32u) flush_q1(32u);
+          }
+        };
+
+        // One-shot warp-prefix-sum scatter for an 8-bit hit_mask (<= 256 hits across warp).
+        auto commit_mask8 = [&](uint32_t hit_mask, uint32_t yy_blk, uint32_t step_off, uint32_t perm) {
+          uint32_t my_n = __popc(hit_mask);
+          uint32_t my_off = 0u;
+          uint32_t total = warp_excl_scan(my_n, lane, my_off);
+          if (total == 0u) return;
+          uint32_t dst = q1_cnt + my_off;
+          uint32_t lane_tag = lane << 12u;
+          #pragma unroll 1
+          while (hit_mask) {
+            uint32_t st = uint32_t(__ffs(int(hit_mask)) - 1);
+            hit_mask &= hit_mask - 1u;
+            s_q1[dst++] = (yy_blk + ((step_off + st) ^ perm)) | lane_tag;
+          }
+          q1_cnt += total;
+          __syncwarp();
+          #pragma unroll 1
+          while (q1_cnt >= 32u) flush_q1(32u);
+        };
+
+        auto sweep_fd_single = [&](uint32_t seg_begin, uint32_t seg_end, uint32_t K1, uint32_t K0) {
+          uint32_t yy = seg_begin;
+          #pragma unroll 1
+          while (yy < seg_end && (((uint32_t(ymin) + yy) & 31u) != 0u)) {
+            uint32_t sh = rotation_y_lh_raw(xz0_lo, K1, K0, uint32_t(ymin) + yy, neg_r0_shift);
+            push_b0_single((sh & target_mask) == 0u, yy);
+            yy++;
+          }
+          // 32-step FD blocks: evaluate then step unconditionally (ZERO branch/predicate overhead!).
+          #pragma unroll 1
+          for (; yy + 32u <= seg_end; yy += 32u) {
+            uint32_t y_base = uint32_t(ymin) + yy;
+            uint32_t B = (xz0_lo ^ y_base) & ~31u;
+            uint32_t perm = xz0_lo & 31u;
+            uint32_t p_lo, p_hi, d_lo, d_hi;
+            fd_init(B, K1, K0, p_lo, p_hi, d_lo, d_hi);
+            #pragma unroll 1
+            for (uint32_t chunk = 0u; chunk < 32u; chunk += 8u) {
+              uint32_t hm = 0u;
+              #pragma unroll
+              for (uint32_t s = 0u; s < 8u; s++) {
+                if ((finish_p_to_step_hi(p_lo, p_hi, neg_r0_shift) & target_mask) == 0u) hm |= (1u << s);
+                fd_step_p(p_lo, p_hi, d_lo, d_hi);
+                fd_step_d(d_lo, d_hi);
+              }
+              commit_mask8(hm, yy, chunk, perm);
+            }
+          }
+          #pragma unroll 1
+          for (; yy < seg_end; yy++) {
+            uint32_t sh = rotation_y_lh_raw(xz0_lo, K1, K0, uint32_t(ymin) + yy, neg_r0_shift);
+            push_b0_single((sh & target_mask) == 0u, yy);
+          }
+        };
+
+        if constexpr (NonNegY) {
+          sweep_fd_single(0u, ny, 84635722u * xz0_hi, 11u * xz0_hi);
+        } else {
+          uint32_t neg_end = ny < zero_yy ? ny : zero_yy;
+          if (0u < neg_end) {
+            uint32_t ly_neg = ~xz0_hi;
+            sweep_fd_single(0u, neg_end, 84635722u * ly_neg, 11u * ly_neg);
+          }
+          if (zero_yy < ny) {
+            sweep_fd_single(zero_yy, ny, 84635722u * xz0_hi, 11u * xz0_hi);
+          }
         }
-        if (pos_begin < end) {
-          uint32_t ly_pos = xz0_hi;
-          sweep_segment_single<AnchorSide>(
-              pos_begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
-              x, ymin, z, task_base_idx, single_n, target_r0,
-              s_blocks[0], blocks, nb, sregs, results, result_count);
+
+        if (q1_cnt > 0u) flush_q1(q1_cnt);
+        if (q2_cnt > 0u) flush_q2(q2_cnt);
+        if (q3_cnt > 0u) flush_q3(q3_cnt);
+      } else if (lane_valid) {
+        uint32_t neg_end = end < zero_yy ? end : zero_yy;
+        uint32_t pos_begin = begin > zero_yy ? begin : zero_yy;
+        if constexpr (NonNegY) {
+          sweep_segment_single_scalar<true>(
+              begin, end, AnchorSide, xz0_lo, 84635722u * xz0_hi, 11u * xz0_hi,
+              x, ymin, z, task_base_idx, single_n, neg_r0_shift,
+              blocks, nb, sregs, results, result_count);
+        } else {
+          if (begin < neg_end) {
+            uint32_t ly_neg = ~xz0_hi;
+            sweep_segment_single_scalar<false>(
+                begin, neg_end, AnchorSide, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
+                x, ymin, z, task_base_idx, single_n, neg_r0_shift,
+                blocks, nb, sregs, results, result_count);
+          }
+          if (pos_begin < end) {
+            sweep_segment_single_scalar<false>(
+                pos_begin, end, AnchorSide, xz0_lo, 84635722u * xz0_hi, 11u * xz0_hi,
+                x, ymin, z, task_base_idx, single_n, neg_r0_shift,
+                blocks, nb, sregs, results, result_count);
+          }
         }
       }
     } else {
-      uint32_t xz1_lo0 = 0u, xz1_hi0 = 0u, xz1_lo1 = 0u, xz1_hi1 = 0u;
-      uint32_t xz1_lo2 = 0u, xz1_hi2 = 0u, xz1_lo3 = 0u, xz1_hi3 = 0u;
-      int32_t b1_y = 0;
-      uint32_t b1_r_pack = 0u, b1_mask = 0u;
-      if (nb > 1u) {
-        if (AllFour || (north_mask & 1u)) {
-          PackedBlock b = s_blocks[0][1];
-          b1_y = b.y;
-          b1_mask = b.meta >> 8u;
-          b1_r_pack |= (b.meta & 3u);
-          if (b.x == 0 && b.z == 0) { xz1_lo0 = xz0_lo; xz1_hi0 = xz0_hi; }
-          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo0, xz1_hi0);
-        }
-        if (AllFour || (north_mask & 2u)) {
-          PackedBlock b = s_blocks[1][1];
-          b1_y = b.y;
-          b1_mask = b.meta >> 8u;
-          b1_r_pack |= (b.meta & 3u) << 2u;
-          if (b.x == 0 && b.z == 0) { xz1_lo1 = xz0_lo; xz1_hi1 = xz0_hi; }
-          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo1, xz1_hi1);
-        }
-        if (AllFour || (north_mask & 4u)) {
-          PackedBlock b = s_blocks[2][1];
-          b1_y = b.y;
-          b1_mask = b.meta >> 8u;
-          b1_r_pack |= (b.meta & 3u) << 4u;
-          if (b.x == 0 && b.z == 0) { xz1_lo2 = xz0_lo; xz1_hi2 = xz0_hi; }
-          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo2, xz1_hi2);
-        }
-        if (AllFour || (north_mask & 8u)) {
-          PackedBlock b = s_blocks[3][1];
-          b1_y = b.y;
-          b1_mask = b.meta >> 8u;
-          b1_r_pack |= (b.meta & 3u) << 6u;
-          if (b.x == 0 && b.z == 0) { xz1_lo3 = xz0_lo; xz1_hi3 = xz0_hi; }
-          else rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xz1_lo3, xz1_hi3);
-        }
-      }
+      // Mode == 1 or Mode == 2 (multi-north).
+      // Per-warp slice (736 u32): lane_xz1 [0..383], s_q2[288] [384..671], s_q3[64] [672..735].
+      uint32_t* lane_xz1 = warp_mem + lane;
+      uint32_t* s_q2 = warp_mem + 384u;
+      uint32_t* s_q3 = warp_mem + 672u;
 
-      if constexpr (NonNegY) {
-        uint32_t ly_pos = xz0_hi;
-        sweep_segment_multi<AnchorSide, AllFour>(
-            begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
-            x, ymin, z, task_base_idx, north_mask, rA,
-            s_blocks, blocks, nb,
-            xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-            b1_y, b1_r_pack, b1_mask, results, result_count);
-      } else {
-        if (begin < neg_end) {
-          uint32_t ly_neg = ~xz0_hi;
-          sweep_segment_multi<AnchorSide, AllFour>(
-              begin, neg_end, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
-              x, ymin, z, task_base_idx, north_mask, rA,
-              s_blocks, blocks, nb,
-              xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-              b1_y, b1_r_pack, b1_mask, results, result_count);
-        }
-        if (pos_begin < end) {
-          uint32_t ly_pos = xz0_hi;
-          sweep_segment_multi<AnchorSide, AllFour>(
-              pos_begin, end, xz0_lo, 84635722u * ly_pos, 11u * ly_pos,
-              x, ymin, z, task_base_idx, north_mask, rA,
-              s_blocks, blocks, nb,
-              xz1_lo0, xz1_hi0, xz1_lo1, xz1_hi1, xz1_lo2, xz1_hi2, xz1_lo3, xz1_hi3,
-              b1_y, b1_r_pack, b1_mask, results, result_count);
+      if (lane_valid && nb > 1u) {
+        #pragma unroll
+        for (int n = 0; n < 4; n++) {
+          if (AllFour || (north_mask & (1u << n))) {
+            PackedBlock b = s_blocks_flat[uint32_t(n) * SHARED_CAP + 1u];
+            uint32_t xl, xh;
+            if (b.x == 0 && b.z == 0) {
+              xl = xz0_lo;
+              xh = xz0_hi;
+            } else {
+              rotation_xz_u32(int32_t(add_i32_wrap(x, b.x)), int32_t(add_i32_wrap(z, b.z)), xl, xh);
+            }
+            uint32_t off = uint32_t(n) << 5u;
+            lane_xz1[off] = xl;
+            if constexpr (NonNegY) {
+              lane_xz1[off + 128u] = 84635722u * xh;
+              lane_xz1[off + 256u] = 11u * xh;
+            } else {
+              lane_xz1[off + 128u] = xh;
+            }
+          }
         }
       }
+      __syncwarp();
+
+      if (full_warp) {
+        uint32_t q2_cnt = 0u, q3_cnt = 0u;
+
+        auto flush_q3 = [&](uint32_t take) {
+          q3_cnt -= take;
+          bool active = (lane < take);
+          uint32_t pkt = active ? s_q3[q3_cnt + lane] : 0u;
+          uint32_t src = (pkt >> 12u) & 31u;
+          uint32_t pyy = pkt & 0xFFFu;
+          int pn = int((pkt >> 17u) & 3u);
+          int32_t cx = __shfl_sync(0xFFFFFFFFu, x, src);
+          int32_t cz = __shfl_sync(0xFFFFFFFFu, z, src);
+          uint32_t cbase = __shfl_sync(0xFFFFFFFFu, task_base_idx, src);
+          if (active && check_tail_shared(s_blocks_flat + uint32_t(pn) * SHARED_CAP, blocks, 3u, nb, pn,
+                                          cx, int32_t(uint32_t(ymin) + pyy), cz)) {
+            results[atomicAdd(result_count, 1u)] = (uint32_t(pn) << 30u) | (cbase + pyy);
+          }
+        };
+
+        auto flush_q2 = [&](uint32_t take) {
+          q2_cnt -= take;
+          bool active = (lane < take);
+          uint32_t pkt = active ? s_q2[q2_cnt + lane] : 0u;
+          uint32_t src = (pkt >> 12u) & 31u;
+          uint32_t pyy = pkt & 0xFFFu;
+          int pn = int((pkt >> 17u) & 3u);
+          int32_t cx = __shfl_sync(0xFFFFFFFFu, x, src);
+          int32_t cz = __shfl_sync(0xFFFFFFFFu, z, src);
+          bool pass2 = false;
+          if (active) {
+            PackedBlock b2 = s_blocks_flat[uint32_t(pn) * SHARED_CAP + 2u];
+            uint32_t xl, xh;
+            rotation_xz_u32(int32_t(add_i32_wrap(cx, b2.x)), int32_t(add_i32_wrap(cz, b2.z)), xl, xh);
+            uint32_t y2 = uint32_t(ymin) + pyy + uint32_t(b2.y);
+            uint32_t ly2 = NonNegY ? xh : (xh ^ uint32_t(int32_t(y2) >> 31));
+            uint32_t neg2 = (uint32_t(-(int32_t(b2.meta & 3u))) & 3u) << 14u;
+            uint32_t m2 = (b2.meta >> 8u) << 14u;
+            pass2 = (rotation_y_lh_raw(xl, 84635722u * ly2, 11u * ly2, y2, neg2) & m2) == 0u;
+          }
+          uint32_t mask2 = __ballot_sync(0xFFFFFFFFu, pass2);
+          if (mask2) {
+            uint32_t rank = __popc(mask2 & lanemask_lt);
+            if (pass2) s_q3[q3_cnt + rank] = pkt;
+            q3_cnt += __popc(mask2);
+            if (q3_cnt >= 32u) flush_q3(32u);
+          }
+        };
+
+        auto push_b1_single = [&](bool pass1, uint32_t yy_hit, uint32_t n_u) {
+          uint32_t bmask = __ballot_sync(0xFFFFFFFFu, pass1);
+          if (bmask) {
+            uint32_t rank = __popc(bmask & lanemask_lt);
+            if (pass1) s_q2[q2_cnt + rank] = yy_hit | (lane << 12u) | (n_u << 17u);
+            q2_cnt += __popc(bmask);
+            if (q2_cnt >= 32u) flush_q2(32u);
+          }
+        };
+
+        // Rotation-difference Block 1 test: ((sh0 ^ sh1) & b1_mask_shift) == 0u!
+        auto test_b1_y1 = [&](uint32_t sh0, uint32_t n_u, uint32_t y1) -> bool {
+          if (!AllFour && ((north_mask & (1u << n_u)) == 0u)) return false;
+          uint32_t off = n_u << 5u;
+          uint32_t xl = lane_xz1[off];
+          uint32_t k1, k0;
+          if constexpr (NonNegY) {
+            k1 = lane_xz1[off + 128u];
+            k0 = lane_xz1[off + 256u];
+          } else {
+            uint32_t ly1 = lane_xz1[off + 128u] ^ uint32_t(int32_t(y1) >> 31);
+            k1 = 84635722u * ly1;
+            k0 = 11u * ly1;
+          }
+          uint32_t sh1 = rotation_y_lh_raw(xl, k1, k0, y1, b1_neg_base_shift);
+          return ((sh0 ^ sh1) & b1_mask_shift) == 0u;
+        };
+
+        // One-shot warp-prefix-sum scatter for an 8-bit hit_mask (<= 256 hits across warp -> fits s_q2[288]).
+        auto commit_mask8_multi = [&](uint32_t hm, uint32_t nk_pack, uint32_t yy_blk, uint32_t step_off, uint32_t perm) {
+          uint32_t my_n = __popc(hm);
+          uint32_t my_off = 0u;
+          uint32_t total = warp_excl_scan(my_n, lane, my_off);
+          if (total == 0u) return;
+          uint32_t dst = q2_cnt + my_off;
+          uint32_t lane_tag = lane << 12u;
+          #pragma unroll 1
+          while (hm) {
+            uint32_t st = uint32_t(__ffs(int(hm)) - 1);
+            hm &= hm - 1u;
+            uint32_t nk = (nk_pack >> (st << 1u)) & 3u;
+            s_q2[dst++] = (yy_blk + ((step_off + st) ^ perm)) | lane_tag | (nk << 17u);
+          }
+          q2_cnt += total;
+          __syncwarp();
+          #pragma unroll 1
+          while (q2_cnt >= 32u) flush_q2(32u);
+        };
+
+        const uint32_t y1_origin = uint32_t(ymin) + uint32_t(b1_y);
+
+        auto sweep_fd_multi = [&](uint32_t seg_begin, uint32_t seg_end, uint32_t K1, uint32_t K0) {
+          uint32_t yy = seg_begin;
+          #pragma unroll 1
+          while (yy < seg_end && (((uint32_t(ymin) + yy) & 31u) != 0u)) {
+            uint32_t sh0 = rotation_y_lh_raw(xz0_lo, K1, K0, uint32_t(ymin) + yy, neg_rA_shift);
+            uint32_t nk = AnchorSide ? ((sh0 >> 14u) & 1u) : ((sh0 >> 14u) & 3u);
+            uint32_t y1 = y1_origin + yy;
+            push_b1_single(test_b1_y1(sh0, nk, y1), yy, nk);
+            if constexpr (AnchorSide) push_b1_single(test_b1_y1(sh0, nk + 2u, y1), yy, nk + 2u);
+            yy++;
+          }
+          // 32-step FD blocks: evaluate then step unconditionally (ZERO branch/predicate overhead!).
+          #pragma unroll 1
+          for (; yy + 32u <= seg_end; yy += 32u) {
+            uint32_t y_base = uint32_t(ymin) + yy;
+            uint32_t y1_base = y1_origin + yy;
+            uint32_t B = (xz0_lo ^ y_base) & ~31u;
+            uint32_t perm = xz0_lo & 31u;
+            uint32_t p_lo, p_hi, d_lo, d_hi;
+            fd_init(B, K1, K0, p_lo, p_hi, d_lo, d_hi);
+            if constexpr (!AnchorSide) {
+              #pragma unroll 1
+              for (uint32_t chunk = 0u; chunk < 32u; chunk += 8u) {
+                uint32_t hm = 0u;
+                uint32_t nk_pack = 0u;
+                #pragma unroll
+                for (uint32_t s = 0u; s < 8u; s++) {
+                  uint32_t sh0 = finish_p_to_step_hi(p_lo, p_hi, neg_rA_shift);
+                  fd_step_p(p_lo, p_hi, d_lo, d_hi);
+                  fd_step_d(d_lo, d_hi);
+                  uint32_t nk = (sh0 >> 14u) & 3u;
+                  uint32_t y1 = y1_base + ((chunk + s) ^ perm);
+                  if (test_b1_y1(sh0, nk, y1)) {
+                    hm |= (1u << s);
+                    nk_pack |= (nk << (s << 1u));
+                  }
+                }
+                commit_mask8_multi(hm, nk_pack, yy, chunk, perm);
+              }
+            } else {
+              #pragma unroll 1
+              for (uint32_t step = 0u; step < 32u; step++) {
+                uint32_t sh0 = finish_p_to_step_hi(p_lo, p_hi, neg_rA_shift);
+                fd_step_p(p_lo, p_hi, d_lo, d_hi);
+                fd_step_d(d_lo, d_hi);
+                uint32_t nk = (sh0 >> 14u) & 1u;
+                uint32_t off_y = step ^ perm;
+                uint32_t y1 = y1_base + off_y;
+                push_b1_single(test_b1_y1(sh0, nk, y1), yy + off_y, nk);
+                push_b1_single(test_b1_y1(sh0, nk + 2u, y1), yy + off_y, nk + 2u);
+              }
+            }
+          }
+          #pragma unroll 1
+          for (; yy < seg_end; yy++) {
+            uint32_t sh0 = rotation_y_lh_raw(xz0_lo, K1, K0, uint32_t(ymin) + yy, neg_rA_shift);
+            uint32_t nk = AnchorSide ? ((sh0 >> 14u) & 1u) : ((sh0 >> 14u) & 3u);
+            uint32_t y1 = y1_origin + yy;
+            push_b1_single(test_b1_y1(sh0, nk, y1), yy, nk);
+            if constexpr (AnchorSide) push_b1_single(test_b1_y1(sh0, nk + 2u, y1), yy, nk + 2u);
+          }
+        };
+
+        if constexpr (NonNegY) {
+          sweep_fd_multi(0u, ny, 84635722u * xz0_hi, 11u * xz0_hi);
+        } else {
+          uint32_t neg_end = ny < zero_yy ? ny : zero_yy;
+          if (0u < neg_end) {
+            uint32_t ly_neg = ~xz0_hi;
+            sweep_fd_multi(0u, neg_end, 84635722u * ly_neg, 11u * ly_neg);
+          }
+          if (zero_yy < ny) {
+            sweep_fd_multi(zero_yy, ny, 84635722u * xz0_hi, 11u * xz0_hi);
+          }
+        }
+
+        if (q2_cnt > 0u) flush_q2(q2_cnt);
+        if (q3_cnt > 0u) flush_q3(q3_cnt);
+      } else if (lane_valid) {
+        uint32_t neg_end = end < zero_yy ? end : zero_yy;
+        uint32_t pos_begin = begin > zero_yy ? begin : zero_yy;
+        if constexpr (NonNegY) {
+          sweep_segment_multi_scalar<AnchorSide, AllFour, true>(
+              begin, end, xz0_lo, 84635722u * xz0_hi, 11u * xz0_hi,
+              x, ymin, z, task_base_idx, north_mask, neg_rA_shift,
+              s_blocks_flat, blocks, nb, lane_xz1,
+              b1_y, b1_neg_base_shift, b1_mask_shift, results, result_count);
+        } else {
+          if (begin < neg_end) {
+            uint32_t ly_neg = ~xz0_hi;
+            sweep_segment_multi_scalar<AnchorSide, AllFour, false>(
+                begin, neg_end, xz0_lo, 84635722u * ly_neg, 11u * ly_neg,
+                x, ymin, z, task_base_idx, north_mask, neg_rA_shift,
+                s_blocks_flat, blocks, nb, lane_xz1,
+                b1_y, b1_neg_base_shift, b1_mask_shift, results, result_count);
+          }
+          if (pos_begin < end) {
+            sweep_segment_multi_scalar<AnchorSide, AllFour, false>(
+                pos_begin, end, xz0_lo, 84635722u * xz0_hi, 11u * xz0_hi,
+                x, ymin, z, task_base_idx, north_mask, neg_rA_shift,
+                s_blocks_flat, blocks, nb, lane_xz1,
+                b1_y, b1_neg_base_shift, b1_mask_shift, results, result_count);
+          }
+        }
+      }
+      __syncwarp();
     }
 
-    zz++;
-    z = int32_t(uint32_t(z) + 1u);
-    if (zz == nz) {
-      zz = 0u;
-      z = zmin;
-      x = int32_t(uint32_t(x) + 1u);
+    if (lane_valid) {
+      zz++;
+      z = int32_t(uint32_t(z) + 1u);
+      if (zz == nz) {
+        zz = 0u;
+        z = zmin;
+        x = int32_t(uint32_t(x) + 1u);
+      }
     }
   }
 }
@@ -510,17 +908,40 @@ __global__ void search_wide(const PackedBlock* __restrict__ blocks, uint32_t nb,
   }
 }
 
+template <int Mode, bool AnchorSide, bool NonNegY, uint32_t FixedItems>
+static void launch_fast_typed(
+    uint32_t grid, uint32_t threads, uint32_t smem_bytes, cudaStream_t stream,
+    const PackedBlock* db, uint32_t nb, uint32_t* df, uint32_t* dc,
+    uint32_t cnt, uint32_t items, int32_t ymin, int32_t zmin,
+    uint32_t ny, uint32_t nz, uint32_t nz_inv,
+    uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase,
+    uint32_t north_mask, int32_t rA, int single_n, uint32_t zero_yy) {
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetAttribute(search_fast_kernel<Mode, AnchorSide, NonNegY, FixedItems>,
+                         cudaFuncAttributePreferredSharedMemoryCarveout,
+                         cudaSharedmemCarveoutMaxShared);
+    configured = true;
+  }
+  search_fast_kernel<Mode, AnchorSide, NonNegY, FixedItems><<<grid, threads, smem_bytes, stream>>>(
+      db, nb, df, dc, cnt, items, ymin, zmin, ny, nz, nz_inv,
+      tasks, yoff, zoff, xbase, north_mask, rA, single_n, zero_yy);
+}
+
 static void dispatch_search_fast(
     uint32_t grid, uint32_t threads, cudaStream_t stream,
     const PackedBlock* db, uint32_t nb, uint32_t* df, uint32_t* dc,
     uint32_t cnt, uint32_t items, int32_t ymin, int32_t zmin,
     uint32_t ny, uint32_t nz, uint32_t nz_inv,
     uint32_t tasks, uint32_t yoff, uint32_t zoff, int32_t xbase,
-    uint32_t north_mask, int32_t rA, uint32_t anchor_side, int single_n, uint32_t zero_yy) {
+    uint32_t north_mask, int32_t rA, uint32_t anchor_side, int single_n,
+    uint32_t zero_yy, bool b012_nonneg) {
   int mode = (single_n >= 0) ? 0 : (north_mask == 0xFu ? 2 : 1);
+  uint32_t smem_bytes = kernel_smem_bytes(mode, threads);
 
   #define LAUNCH_KERNEL(M, AS, NNY, FI) \
-    search_fast_kernel<M, AS, NNY, FI><<<grid, threads, 0, stream>>>( \
+    launch_fast_typed<M, AS, NNY, FI>( \
+        grid, threads, smem_bytes, stream, \
         db, nb, df, dc, cnt, items, ymin, zmin, ny, nz, nz_inv, \
         tasks, yoff, zoff, xbase, north_mask, rA, single_n, zero_yy)
 
@@ -533,7 +954,7 @@ static void dispatch_search_fast(
     }
 
   #define DISPATCH_NNY(M, AS) \
-    if (zero_yy == 0u) { DISPATCH_ITEMS(M, AS, true); } \
+    if (b012_nonneg) { DISPATCH_ITEMS(M, AS, true); } \
     else { DISPATCH_ITEMS(M, AS, false); }
 
   if (!anchor_side) {
@@ -557,11 +978,11 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
                      uint32_t* df, uint32_t* dc, cudaStream_t stream,
                      const Options& s_opt, const std::string& mode, bool fast, uint32_t batch,
                      uint32_t north_mask, int32_t rA, uint32_t anchor_side, int single_n,
-                     uint32_t nz_inv, uint32_t zero_yy) {
+                     uint32_t nz_inv, uint32_t zero_yy, bool b012_nonneg) {
   Tune fallback{128, 1};
   bool manual = std::getenv("GRASS_THREADS") || std::getenv("GRASS_ITEMS");
   if (manual) {
-    uint32_t t = tuning("GRASS_THREADS", 128, 32, 1024);
+    uint32_t t = tuning("GRASS_THREADS", 128, 32, 256);
     uint32_t it = tuning("GRASS_ITEMS", 1, 1, 8);
     if (t % 32) throw std::runtime_error("GRASS_THREADS must be multiple of 32");
     return {t, it};
@@ -572,7 +993,7 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
   }
 
   std::string key = std::string(prop.name) + "/" + std::to_string(prop.major) + "." + std::to_string(prop.minor) +
-                    "/columns-ptx-smem-v8/" + std::to_string(s_opt.dim[1]) + "/" + std::to_string(s_opt.dim[2]);
+                    "/columns-fd-scan-v12/" + std::to_string(s_opt.dim[1]) + "/" + std::to_string(s_opt.dim[2]);
   key += "/mask=" + std::to_string(north_mask) + "/rA=" + std::to_string(rA);
   for (auto b : tuneBlocks)
     key += "/" + std::to_string(b.x) + "," + std::to_string(b.y) + "," + std::to_string(b.z) + "," +
@@ -592,7 +1013,7 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
     std::string saved;
     uint32_t t = 0, it = 0;
     if (std::getline(f, saved) && saved == key && (f >> t >> it) &&
-        (t == 64 || t == 128 || t == 256 || t == 512) && (it == 1 || it == 2 || it == 4)) {
+        (t == 64 || t == 128 || t == 256) && (it == 1 || it == 2 || it == 4)) {
       std::cerr << "autotune cache hit " << t << " threads " << it << " items\n";
       return {t, it};
     }
@@ -613,7 +1034,7 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
   check(cudaEventCreate(&begin));
   check(cudaEventCreate(&end));
 
-  for (uint32_t t : {64u, 128u, 256u, 512u}) {
+  for (uint32_t t : {64u, 128u, 256u}) {
     for (uint32_t it : {1u, 2u, 4u}) {
       auto launch = [&]() {
         check(cudaMemsetAsync(dc, 0, sizeof(uint32_t), stream));
@@ -623,7 +1044,7 @@ static Tune autotune(const cudaDeviceProp& prop, const PackedBlock* db, const st
           dispatch_search_fast(
               grid, t, stream, db, uint32_t(tuneBlocks.size()), df, dc,
               n, it, s_opt.lo[1], s_opt.lo[2], uint32_t(s_opt.dim[1]), uint32_t(s_opt.dim[2]), nz_inv,
-              tasks, 0, 0, s_opt.lo[0], north_mask, rA, anchor_side, single_n, zero_yy);
+              tasks, 0, 0, s_opt.lo[0], north_mask, rA, anchor_side, single_n, zero_yy, b012_nonneg);
         } else {
           search_wide<<<(n + t * it - 1) / (t * it), t, 0, stream>>>(
               db, uint32_t(tuneBlocks.size()), df, dc,
@@ -730,7 +1151,13 @@ int main(int argc, char** argv) {
     }
     if (original.size() > 1) {
       std::stable_sort(original.begin() + 1, original.end(),
-                       [](const Block& a, const Block& b) { return a.side < b.side; });
+                       [](const Block& a, const Block& b) {
+                         if (a.side != b.side) return a.side < b.side;
+                         bool a_same_col = (a.x == 0 && a.z == 0);
+                         bool b_same_col = (b.x == 0 && b.z == 0);
+                         if (a_same_col != b_same_col) return a_same_col;
+                         return (a.y >= 0) && (b.y < 0);
+                       });
     }
 
     int32_t rot_rx[4] = {}, rot_rz[4] = {};
@@ -768,7 +1195,7 @@ int main(int argc, char** argv) {
     check(cudaGetDeviceProperties(&prop, 0));
 
     uint32_t default_batch = 16777216u;
-    if (s_opt.dim[1] >= 256u && prop.totalGlobalMem >= (6ULL << 30) && !anchor_side) {
+    if (s_opt.dim[1] >= 128u && prop.totalGlobalMem >= (4ULL << 30) && !anchor_side) {
       default_batch = 67108864u;
     } else if (s_opt.dim[1] >= 128u && prop.totalGlobalMem >= (3ULL << 30)) {
       default_batch = 33554432u;
@@ -782,6 +1209,9 @@ int main(int argc, char** argv) {
     uint32_t zero_yy = (s_opt.lo[1] >= 0)
         ? 0u
         : ((int64_t(s_opt.lo[1]) + int64_t(ny32) <= 0) ? ny32 : uint32_t(-int64_t(s_opt.lo[1])));
+    bool b012_nonneg = (s_opt.lo[1] >= 0) &&
+        (original.size() <= 1 || int64_t(s_opt.lo[1]) + int64_t(original[1].y) >= 0) &&
+        (original.size() <= 2 || int64_t(s_opt.lo[1]) + int64_t(original[2].y) >= 0);
 
     size_t slot_blocks = std::max<size_t>(512, original.size());
     PackedBlock* db = nullptr;
@@ -830,7 +1260,7 @@ int main(int argc, char** argv) {
     }
 
     Tune tune = autotune(prop, db, original, df[0], dc[0], streams[0], s_opt, mode, fast, alloc_batch,
-                         north_mask, rA, anchor_side, single_n, nz_inv, zero_yy);
+                         north_mask, rA, anchor_side, single_n, nz_inv, zero_yy, b012_nonneg);
     uint32_t threads = tune.threads;
     uint32_t items = tune.items;
 
@@ -864,7 +1294,7 @@ int main(int argc, char** argv) {
         dispatch_search_fast(
             grid, threads, streams[s], db, uint32_t(original.size()), df[s], dc[s],
             cnt, items, s_opt.lo[1], s_opt.lo[2], ny32, nz32, nz_inv,
-            tasks, yoff, zoff, xbase, north_mask, rA, anchor_side, single_n, zero_yy);
+            tasks, yoff, zoff, xbase, north_mask, rA, anchor_side, single_n, zero_yy, b012_nonneg);
       } else {
         uint32_t grid = (cnt + threads * items - 1) / (threads * items);
         search_wide<<<grid, threads, 0, streams[s]>>>(
