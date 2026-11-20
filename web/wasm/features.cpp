@@ -466,6 +466,8 @@ int findAndRemoveHomographyNapsac(std::vector<cv::Point2f>& P, std::vector<cv::P
         }
       }
       if (pool.size() >= 3) {
+        // Restore ascending point-index order so NAPSAC draws match the baseline scan exactly.
+        std::sort(pool.begin(), pool.end());
         const std::uint32_t m = static_cast<std::uint32_t>(pool.size());
         int a = static_cast<int>(nextRand() % m);
         int b = static_cast<int>(nextRand() % (m - 1));
@@ -649,22 +651,15 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
     PhaseTimer matchingTimer(timings && b.count > 0 ? &timings->matchingHomography : nullptr);
     std::vector<SiftMatchTuple> matches(b.count);
 #ifdef __wasm_simd128__
-    // Pack reference descriptors contiguously (128 floats each) and precompute squared norms
-    // so matching reduces to 4-way tiled dot products: ||b - a||^2 = ||b||^2 + ||a||^2 - 2*(b . a).
+    // Pack reference descriptors contiguously (128 floats each) and compute exact squared L2
+    // distances with 2x4 SIMD register tiling (avoids dot-product cancellation on near matches).
     std::vector<float> aPack(static_cast<std::size_t>(a.count) * 128);
-    std::vector<float> aNorm2(a.count);
     for (int j = 0; j < a.count; ++j) {
       const float* src = a.data.data() + j * FeatureStride + 2;
       float* dst = aPack.data() + j * 128;
-      v128_t nAcc = wasm_f32x4_splat(0.0f);
       for (int k = 0; k < 128; k += 4) {
-        v128_t v = wasm_v128_load(src + k);
-        wasm_v128_store(dst + k, v);
-        nAcc = wasm_f32x4_add(nAcc, wasm_f32x4_mul(v, v));
+        wasm_v128_store(dst + k, wasm_v128_load(src + k));
       }
-      nAcc = wasm_f32x4_add(nAcc, wasm_i32x4_shuffle(nAcc, nAcc, 2, 3, 0, 1));
-      nAcc = wasm_f32x4_add(nAcc, wasm_i32x4_shuffle(nAcc, nAcc, 1, 0, 3, 2));
-      aNorm2[j] = wasm_f32x4_extract_lane(nAcc, 0);
     }
 
     auto hsum4 = [](v128_t v) -> float {
@@ -673,23 +668,10 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
       return wasm_f32x4_extract_lane(v, 0);
     };
 
-    // Precompute b descriptor squared norms once for 2x4 tiled GEMM-style dot products.
-    std::vector<float> bNorm2(b.count);
-    for (int i = 0; i < b.count; ++i) {
-      const float* bp = b.data.data() + i * FeatureStride + 2;
-      v128_t bnAcc = wasm_f32x4_splat(0.0f);
-      for (int k = 0; k < 128; k += 4) {
-        v128_t v = wasm_v128_load(bp + k);
-        bnAcc = wasm_f32x4_add(bnAcc, wasm_f32x4_mul(v, v));
-      }
-      bNorm2[i] = hsum4(bnAcc);
-    }
-
     int i = 0;
     for (; i + 2 <= b.count; i += 2) {
       const float* bp0 = b.data.data() + i * FeatureStride + 2;
       const float* bp1 = b.data.data() + (i + 1) * FeatureStride + 2;
-      const float bn0 = bNorm2[i], bn1 = bNorm2[i + 1];
       double best0 = std::numeric_limits<double>::infinity(), second0 = best0;
       double best1 = std::numeric_limits<double>::infinity(), second1 = best1;
       int jb0 = 0, jb1 = 0;
@@ -711,20 +693,20 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
           const v128_t va1 = wasm_v128_load(ap1 + k);
           const v128_t va2 = wasm_v128_load(ap2 + k);
           const v128_t va3 = wasm_v128_load(ap3 + k);
-          d00 = wasm_f32x4_add(d00, wasm_f32x4_mul(vb0, va0));
-          d01 = wasm_f32x4_add(d01, wasm_f32x4_mul(vb0, va1));
-          d02 = wasm_f32x4_add(d02, wasm_f32x4_mul(vb0, va2));
-          d03 = wasm_f32x4_add(d03, wasm_f32x4_mul(vb0, va3));
-          d10 = wasm_f32x4_add(d10, wasm_f32x4_mul(vb1, va0));
-          d11 = wasm_f32x4_add(d11, wasm_f32x4_mul(vb1, va1));
-          d12 = wasm_f32x4_add(d12, wasm_f32x4_mul(vb1, va2));
-          d13 = wasm_f32x4_add(d13, wasm_f32x4_mul(vb1, va3));
+          v128_t t;
+          t = wasm_f32x4_sub(vb0, va0); d00 = wasm_f32x4_add(d00, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb0, va1); d01 = wasm_f32x4_add(d01, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb0, va2); d02 = wasm_f32x4_add(d02, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb0, va3); d03 = wasm_f32x4_add(d03, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb1, va0); d10 = wasm_f32x4_add(d10, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb1, va1); d11 = wasm_f32x4_add(d11, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb1, va2); d12 = wasm_f32x4_add(d12, wasm_f32x4_mul(t, t));
+          t = wasm_f32x4_sub(vb1, va3); d13 = wasm_f32x4_add(d13, wasm_f32x4_mul(t, t));
         }
-        const float dots0[4] = {hsum4(d00), hsum4(d01), hsum4(d02), hsum4(d03)};
-        const float dots1[4] = {hsum4(d10), hsum4(d11), hsum4(d12), hsum4(d13)};
+        const float dists0[4] = {hsum4(d00), hsum4(d01), hsum4(d02), hsum4(d03)};
+        const float dists1[4] = {hsum4(d10), hsum4(d11), hsum4(d12), hsum4(d13)};
         for (int m = 0; m < 4; ++m) {
-          const float an = aNorm2[j + m];
-          const double dist0 = std::max(0.0, double(bn0 + an - 2.0f * dots0[m]));
+          const double dist0 = double(dists0[m]);
           if (dist0 < best0) {
             second0 = best0;
             best0 = dist0;
@@ -732,7 +714,7 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
           } else if (dist0 < second0) {
             second0 = dist0;
           }
-          const double dist1 = std::max(0.0, double(bn1 + an - 2.0f * dots1[m]));
+          const double dist1 = double(dists1[m]);
           if (dist1 < best1) {
             second1 = best1;
             best1 = dist1;
@@ -747,11 +729,12 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
         v128_t d0 = wasm_f32x4_splat(0.0f), d1 = wasm_f32x4_splat(0.0f);
         for (int k = 0; k < 128; k += 4) {
           const v128_t va = wasm_v128_load(ap + k);
-          d0 = wasm_f32x4_add(d0, wasm_f32x4_mul(wasm_v128_load(bp0 + k), va));
-          d1 = wasm_f32x4_add(d1, wasm_f32x4_mul(wasm_v128_load(bp1 + k), va));
+          v128_t t0 = wasm_f32x4_sub(wasm_v128_load(bp0 + k), va);
+          v128_t t1 = wasm_f32x4_sub(wasm_v128_load(bp1 + k), va);
+          d0 = wasm_f32x4_add(d0, wasm_f32x4_mul(t0, t0));
+          d1 = wasm_f32x4_add(d1, wasm_f32x4_mul(t1, t1));
         }
-        const float an = aNorm2[j];
-        const double dist0 = std::max(0.0, double(bn0 + an - 2.0f * hsum4(d0)));
+        const double dist0 = double(hsum4(d0));
         if (dist0 < best0) {
           second0 = best0;
           best0 = dist0;
@@ -759,7 +742,7 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
         } else if (dist0 < second0) {
           second0 = dist0;
         }
-        const double dist1 = std::max(0.0, double(bn1 + an - 2.0f * hsum4(d1)));
+        const double dist1 = double(hsum4(d1));
         if (dist1 < best1) {
           second1 = best1;
           best1 = dist1;
@@ -773,7 +756,6 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
     }
     for (; i < b.count; ++i) {
       const float* bp = b.data.data() + i * FeatureStride + 2;
-      const float bn = bNorm2[i];
       double best = std::numeric_limits<double>::infinity();
       double second = best;
       int jbest = 0;
@@ -781,9 +763,10 @@ std::vector<Quad> siftSeeds(const std::vector<float>& green, int w, int h, const
         const float* ap = aPack.data() + j * 128;
         v128_t d0 = wasm_f32x4_splat(0.0f);
         for (int k = 0; k < 128; k += 4) {
-          d0 = wasm_f32x4_add(d0, wasm_f32x4_mul(wasm_v128_load(bp + k), wasm_v128_load(ap + k)));
+          v128_t t = wasm_f32x4_sub(wasm_v128_load(bp + k), wasm_v128_load(ap + k));
+          d0 = wasm_f32x4_add(d0, wasm_f32x4_mul(t, t));
         }
-        const double dist = std::max(0.0, double(bn + aNorm2[j] - 2.0f * hsum4(d0)));
+        const double dist = double(hsum4(d0));
         if (dist < best) {
           second = best;
           best = dist;

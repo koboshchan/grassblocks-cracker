@@ -2505,6 +2505,8 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
 
           v128_t vbx = wasm_i32x4_add (wasm_i32x4_trunc_sat_f32x4 (vflx), vthree_i) ;
           v128_t vby = wasm_i32x4_add (wasm_i32x4_trunc_sat_f32x4 (vfly), vthree_i) ;
+          vbx = wasm_i32x4_min (wasm_i32x4_max (vbx, wasm_i32x4_splat (0)), wasm_i32x4_splat (4)) ;
+          vby = wasm_i32x4_min (wasm_i32x4_max (vby, wasm_i32x4_splat (0)), wasm_i32x4_splat (4)) ;
           v128_t vbt0 = wasm_v128_and (wasm_i32x4_trunc_sat_f32x4 (vflt), v7_i) ;
           v128_t voff = wasm_i32x4_add (wasm_i32x4_add (wasm_i32x4_mul (vby, v54_i), wasm_i32x4_mul (vbx, v9_i)), vbt0) ;
 

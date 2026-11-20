@@ -938,7 +938,8 @@ struct SharedTrialCache {
       float d2 = (q2x - e.q[4]) * (q2x - e.q[4]) + (q2y - e.q[5]) * (q2y - e.q[5]);
       float d3 = (q3x - e.q[6]) * (q3x - e.q[6]) + (q3y - e.q[7]) * (q3y - e.q[7]);
       float maxD = std::max(std::max(d0, d1), std::max(d2, d3));
-      const float limitSq = e.score < 0.45f ? (0.14f * 0.14f) : (0.08f * 0.08f);
+      // Only allow sub-pixel reuse for clear background rejects; re-evaluate any candidate block unless near-exact.
+      const float limitSq = e.score < 0.45f ? (0.12f * 0.12f) : 1e-6f;
       if (maxD < limitSq) {
         out = {e.valid != 0, int(e.rot), int(e.votes), double(e.score), double(e.margin)};
         return true;

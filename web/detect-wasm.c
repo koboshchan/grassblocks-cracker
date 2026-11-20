@@ -229,6 +229,7 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
     double q_uu[4] = {0, 0, 0, 0};
     v128_t q_cov0[4] = {dzero, dzero, dzero, dzero};
     v128_t q_cov1[4] = {dzero, dzero, dzero, dzero};
+    double base_shift = 128.0;
 
     if (fast_bounds) {
       const float h0 = (float)H[0], h1 = (float)H[1], h2 = (float)H[2];
@@ -244,6 +245,17 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
       const v128_t step4y = wasm_f32x4_splat(4.0f * h3);
       const v128_t step4d = wasm_f32x4_splat(4.0f * h6);
 
+      /* Anchor shift at corner (1.5, 1.5) to prevent float32 variance cancellation on flat patches. */
+      float anchor_f;
+      {
+        double cd0 = H[6] * 1.5 + H[7] * 1.5 + 1.0;
+        double px0 = (H[0] * 1.5 + H[1] * 1.5 + H[2]) / cd0;
+        double py0 = (H[3] * 1.5 + H[4] * 1.5 + H[5]) / cd0;
+        anchor_f = (float)g[(int)py0 * w + (int)px0];
+      }
+      const v128_t fbase = wasm_f32x4_splat(anchor_f);
+      base_shift = (double)anchor_f;
+
       v128_t qcov[4] = {fzero, fzero, fzero, fzero};
       v128_t vsu[4] = {fzero, fzero, fzero, fzero};
       v128_t vuu[4] = {fzero, fzero, fzero, fzero};
@@ -251,7 +263,6 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
       /* Pair rows (j, j+1) so cols 13..14 of both rows share one 4-wide sample call (49 calls/quad). */
       for (int j = 1; j < 15; j += 2) {
         const float vj0 = (float)j + 0.5f;
-        const float vj1 = vj0 + 1.0f;
         const int qr0 = (j >= 8) ? 2 : 0;
         const int qr1 = ((j + 1) >= 8) ? 2 : 0;
 
@@ -265,29 +276,29 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
         if (is_affine) {
           v128_t px0 = wasm_f32x4_add(wasm_f32x4_splat(bx0), vx_off);
           v128_t py0 = wasm_f32x4_add(wasm_f32x4_splat(by0), vy_off);
-          u0_1 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), f128);
+          u0_1 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), fbase);
           px0 = wasm_f32x4_add(px0, step4x);
           py0 = wasm_f32x4_add(py0, step4y);
-          u0_5 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), f128);
+          u0_5 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), fbase);
           px0 = wasm_f32x4_add(px0, step4x);
           py0 = wasm_f32x4_add(py0, step4y);
-          u0_9 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), f128);
+          u0_9 = wasm_f32x4_sub(bilerp4(g, w, px0, py0), fbase);
 
           v128_t px1 = wasm_f32x4_add(wasm_f32x4_splat(bx1), vx_off);
           v128_t py1 = wasm_f32x4_add(wasm_f32x4_splat(by1), vy_off);
-          u1_1 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), f128);
+          u1_1 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), fbase);
           px1 = wasm_f32x4_add(px1, step4x);
           py1 = wasm_f32x4_add(py1, step4y);
-          u1_5 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), f128);
+          u1_5 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), fbase);
           px1 = wasm_f32x4_add(px1, step4x);
           py1 = wasm_f32x4_add(py1, step4y);
-          u1_9 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), f128);
+          u1_9 = wasm_f32x4_sub(bilerp4(g, w, px1, py1), fbase);
 
           v128_t pxt =
               wasm_i32x4_shuffle(wasm_f32x4_add(px0, step4x), wasm_f32x4_add(px1, step4x), 0, 1, 4, 5);
           v128_t pyt =
               wasm_i32x4_shuffle(wasm_f32x4_add(py0, step4y), wasm_f32x4_add(py1, step4y), 0, 1, 4, 5);
-          u_tail = wasm_f32x4_sub(bilerp4(g, w, pxt, pyt), f128);
+          u_tail = wasm_f32x4_sub(bilerp4(g, w, pxt, pyt), fbase);
         } else {
           float bd0 = h6 * 1.5f + h7 * vj0 + 1.0f;
           float bd1 = bd0 + h7;
@@ -295,28 +306,28 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
           v128_t nx0 = wasm_f32x4_add(wasm_f32x4_splat(bx0), vx_off);
           v128_t ny0 = wasm_f32x4_add(wasm_f32x4_splat(by0), vy_off);
           v128_t nd0 = wasm_f32x4_add(wasm_f32x4_splat(bd0), vd_off);
-          u0_1 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), f128);
+          u0_1 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), fbase);
           nx0 = wasm_f32x4_add(nx0, step4x);
           ny0 = wasm_f32x4_add(ny0, step4y);
           nd0 = wasm_f32x4_add(nd0, step4d);
-          u0_5 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), f128);
+          u0_5 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), fbase);
           nx0 = wasm_f32x4_add(nx0, step4x);
           ny0 = wasm_f32x4_add(ny0, step4y);
           nd0 = wasm_f32x4_add(nd0, step4d);
-          u0_9 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), f128);
+          u0_9 = wasm_f32x4_sub(sample4_f32(g, w, nx0, ny0, nd0), fbase);
 
           v128_t nx1 = wasm_f32x4_add(wasm_f32x4_splat(bx1), vx_off);
           v128_t ny1 = wasm_f32x4_add(wasm_f32x4_splat(by1), vy_off);
           v128_t nd1 = wasm_f32x4_add(wasm_f32x4_splat(bd1), vd_off);
-          u1_1 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), f128);
+          u1_1 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), fbase);
           nx1 = wasm_f32x4_add(nx1, step4x);
           ny1 = wasm_f32x4_add(ny1, step4y);
           nd1 = wasm_f32x4_add(nd1, step4d);
-          u1_5 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), f128);
+          u1_5 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), fbase);
           nx1 = wasm_f32x4_add(nx1, step4x);
           ny1 = wasm_f32x4_add(ny1, step4y);
           nd1 = wasm_f32x4_add(nd1, step4d);
-          u1_9 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), f128);
+          u1_9 = wasm_f32x4_sub(sample4_f32(g, w, nx1, ny1, nd1), fbase);
 
           v128_t nxt =
               wasm_i32x4_shuffle(wasm_f32x4_add(nx0, step4x), wasm_f32x4_add(nx1, step4x), 0, 1, 4, 5);
@@ -324,7 +335,7 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
               wasm_i32x4_shuffle(wasm_f32x4_add(ny0, step4y), wasm_f32x4_add(ny1, step4y), 0, 1, 4, 5);
           v128_t ndt =
               wasm_i32x4_shuffle(wasm_f32x4_add(nd0, step4d), wasm_f32x4_add(nd1, step4d), 0, 1, 4, 5);
-          u_tail = wasm_f32x4_sub(sample4_f32(g, w, nxt, nyt, ndt), f128);
+          u_tail = wasm_f32x4_sub(sample4_f32(g, w, nxt, nyt, ndt), fbase);
         }
 
         accum_row_cov(j * 16, u0_1, u0_5, u0_9, u_tail, 0, &qcov[qr0], &qcov[qr0 + 1], &vsu[qr0], &vuu[qr0],
@@ -392,7 +403,7 @@ void classify_batch(const u8* g, int w, int h, const float* quads, int count, fl
     v128_t fcov0 = dzero, fcov1 = dzero;
     for (int q = 0; q < 4; q++) {
       v128_t vsuq = wasm_f64x2_splat(q_su[q]);
-      v128_t vsaq = wasm_f64x2_splat(q_su[q] + 49.0 * 128.0);
+      v128_t vsaq = wasm_f64x2_splat(q_su[q] + 49.0 * base_shift);
       v128_t cq0 = wasm_f64x2_sub(q_cov0[q], wasm_f64x2_mul(vsuq, wasm_v128_load(q_fsum_div_49[q])));
       v128_t cq1 = wasm_f64x2_sub(q_cov1[q], wasm_f64x2_mul(vsuq, wasm_v128_load(q_fsum_div_49[q] + 2)));
       q_cov0[q] = cq0;
