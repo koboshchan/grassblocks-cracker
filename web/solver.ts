@@ -2,11 +2,15 @@ import {assetUrl} from './src/asset-dir';
 import workerSource from './solver-worker.ts?worker';
 import {turnBlocks as rawTurnBlocks,validate,type Block,type SearchOptions} from './hash';
 const turnBlocks=(blocks:Block[],n:number)=>rawTurnBlocks(blocks,n).sort((a,b)=>a.is_side-b.is_side);
-export async function createSolver({backend='auto',workers}:{backend?:'auto'|'cpu'|'gpu';workers?:number}={}) {
- if(backend!=='cpu'&&navigator.gpu) {
-  try {return await gpuSolver();}catch(e){if(backend==='gpu')throw e;console.warn('WebGPU unavailable; using CPU WASM',e);}
+// Solver selection is independent of the image detector backend (detection is always WASM).
+export async function createSolver({backend='auto',workers,fallbackReason}:{backend?:'auto'|'cpu'|'gpu';workers?:number;fallbackReason?:string}={}) {
+ let reason=fallbackReason;
+ if(backend==='cpu'){reason=reason||'CPU requested';}
+ else if(!navigator.gpu)reason='navigator.gpu unavailable (no WebGPU in this context)';
+ else {
+  try {return await gpuSolver();}catch(e:any){if(backend==='gpu')throw e;reason='WebGPU init failed: '+(e?.message||e);console.warn('WebGPU unavailable; using CPU WASM',e);}
  }
- return cpuSolver(workers);
+ return Object.assign(await cpuSolver(workers),{fallbackReason:reason});
 }
 function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
  const anchorIdx = Math.max(0, blocks.findIndex(b => b.is_side === 0));
@@ -71,7 +75,9 @@ async function gpuSolver(){
  if(!adapter)throw Error('No WebGPU adapter. Try the WASM CPU mode or a native solver.');
  const device=await adapter.requestDevice();let lost;
  device.lost.then(i=>{lost=i.message||'GPU device lost';});
- const code=await (await fetch(assetUrl('kernel.wgsl',import.meta.url))).text();
+ const kres=await fetch(assetUrl('kernel.wgsl',import.meta.url));
+ if(!kres.ok)throw Error('kernel.wgsl HTTP '+kres.status);
+ const code=await kres.text();
  const module=device.createShaderModule({code});
  const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');
  if(errors.length)throw Error(errors.map(e=>e.message).join('\n'));

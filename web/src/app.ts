@@ -216,11 +216,12 @@ async function doSearch(bl: any[], bnd: any, mm: number, signal: AbortSignal) {
     onMatch: (m: any) => { nm++; $('#sMatch').textContent = String(nm); if (nm <= 500) { $('#matches').appendChild(matchItem(m)); } } });
   const rows = bl.filter(b => b.include).map(b => ({ x: b.x, y: b.y, z: b.z, rotation: b.rotation, is_side: b.is_side }));
   if (!solver) solver = await createSolver({ backend: 'auto' });
+  $('#runStats').textContent = 'Searching on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + ((solver as any).fallbackReason ? ' (' + (solver as any).fallbackReason + ')' : '');
   try { return await solver.search(rows, opts(solver.backend)); }
   catch (e: any) {
     if (signal.aborted || solver?.backend !== 'webgpu') throw e;
     // GPU execution error: rerun the same input on the WASM solver.
-    solver.destroy?.(); solver = await createSolver({ backend: 'cpu' }); nm = 0; $('#matches').innerHTML = ''; $('#sMatch').textContent = '0';
+    solver.destroy?.(); solver = await createSolver({ backend: 'cpu', fallbackReason: 'WebGPU search error: ' + (e.message || e) }); nm = 0; $('#matches').innerHTML = ''; $('#sMatch').textContent = '0';
     $('#runStats').textContent = 'GPU error, retrying on WASM: ' + (e.message || e);
     return await solver.search(rows, opts('cpu'));
   }
@@ -252,7 +253,7 @@ $('#btnStart').onclick = async () => {
   const wasRunning = running; finishRun();
   if (res.status === 'done' && res.result) {
     const r = res.result; tick(); $('#sMatch').textContent = String(r.matches.length);
-    $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + '. ' + r.matches.length + ' match(es).';
+    $('#runStats').textContent = (r.cancelled ? 'Cancelled' : r.stopped ? 'Stopped: ' + (r.stopReason || 'limit reached') : 'Done') + ' on ' + solver.backend + ' ' + (solver.adapterInfo?.description || solver.adapterInfo?.vendor || '') + ((solver as any).fallbackReason ? ' (' + (solver as any).fallbackReason + ')' : '') + '. ' + r.matches.length + ' match(es).';
     if (!r.cancelled && !r.stopped) $('#sPct').textContent = '100%';
   } else if (res.status === 'cancelled') $('#runStats').textContent = 'Cancelled';
   else $('#runStats').textContent = res.status === 'error' ? 'Error: ' + res.message : (res.message || 'Nothing to do.');
