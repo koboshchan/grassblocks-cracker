@@ -16,12 +16,25 @@ function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
  const anchorIdx = Math.max(0, blocks.findIndex(b => b.is_side === 0));
  const anchor = blocks[anchorIdx] || blocks[0];
  const xA = anchor.x, yA = anchor.y, zA = anchor.z, rA = anchor.rotation, sideA = anchor.is_side;
- const centered = [anchor, ...blocks.filter((_, i) => i !== anchorIdx).sort((a, b) => a.is_side - b.is_side)].map(b => ({
+ const rest = blocks
+  .filter((_, i) => i !== anchorIdx)
+  .sort((a, b) => {
+   if (a.is_side !== b.is_side) return a.is_side - b.is_side;
+   const aSameXZ = a.x === xA && a.z === zA ? 0 : 1;
+   const bSameXZ = b.x === xA && b.z === zA ? 0 : 1;
+   if (aSameXZ !== bSameXZ) return aSameXZ - bSameXZ;
+   const aNonNeg = a.y >= yA ? 0 : 1;
+   const bNonNeg = b.y >= yA ? 0 : 1;
+   return aNonNeg - bNonNeg;
+  });
+ const centered = [anchor, ...rest].map(b => ({
   ...b,
   x: b.x - xA,
   y: b.y - yA,
   z: b.z - zA,
  }));
+ const b1y = centered.length > 1 ? centered[1].y : 0;
+ const b2y = centered.length > 2 ? centered[2].y : 0;
  const data = new Int32Array(centered.length * 16);
  const mblocks = new Int32Array(4 * 512 * 5);
  let activeMask = 0;
@@ -67,7 +80,7 @@ function packMultiNorthBlocks(blocks: Block[], activeNorth: number[]) {
   data[off + 14] = 0;
   data[off + 15] = 0;
  }
- return { data, mblocks, nb: centered.length, activeMask, xA, yA, zA, rA, sideA, rotRx, rotRz, minRx, maxRx, minRz, maxRz };
+ return { data, mblocks, nb: centered.length, activeMask, xA, yA, zA, rA, sideA, b1y, b2y, rotRx, rotRz, minRx, maxRx, minRz, maxRz };
 }
 
 async function gpuSolver(){
@@ -85,19 +98,39 @@ async function gpuSolver(){
  const layout=device.createPipelineLayout({bindGroupLayouts:[blockLayout]});
  let wg=128,items=1;
  const pipeCache=new Map<string,Promise<GPUComputePipeline>>();
- function getSearchPipeline(w:number,it:number,singleNorth:number,allFour:boolean):Promise<GPUComputePipeline>{
-  const key=`${w}:${it}:${singleNorth}:${allFour?1:0}`;
+ function getSearchPipeline(
+  w:number,
+  it:number,
+  singleNorth:number,
+  allFour:boolean,
+  nonNegY:boolean,
+  anchorSide:boolean,
+  manyBlocks:boolean,
+ ):Promise<GPUComputePipeline>{
+  const key=`${w}:${it}:${singleNorth}:${allFour?1:0}:${nonNegY?1:0}:${anchorSide?1:0}:${manyBlocks?1:0}`;
   let p=pipeCache.get(key);
   if(!p){
    p=device.createComputePipelineAsync({
     layout,
-    compute:{module,entryPoint:'search',constants:{WG_SIZE:w,ITEMS:it,SINGLE_NORTH:singleNorth,ALL_FOUR:allFour?1:0}},
+    compute:{
+     module,
+     entryPoint:'search',
+     constants:{
+      WG_SIZE:w,
+      ITEMS:it,
+      SINGLE_NORTH:singleNorth,
+      ALL_FOUR:allFour?1:0,
+      NONNEG_Y:nonNegY?1:0,
+      ANCHOR_SIDE:anchorSide?1:0,
+      MANY_BLOCKS:manyBlocks?1:0,
+     },
+    },
    });
    pipeCache.set(key,p);
   }
   return p;
  }
- await getSearchPipeline(wg,items,-1,false);
+ await getSearchPipeline(wg,items,-1,true,true,false,true);
  let tuned=false;let tuning:any=null;
  const RING_SIZE=4;
  const resultSize=16+4096*16;
@@ -108,7 +141,7 @@ async function gpuSolver(){
  const zero4=new Uint32Array(4);
  const rawInfo:Partial<GPUAdapterInfo>=adapter.info||{};const adapterInfo={vendor:rawInfo.vendor||'',architecture:rawInfo.architecture||'',device:rawInfo.device||'',description:rawInfo.description||''};
  let codeHash=0;for(const c of code)codeHash=(Math.imul(codeHash,31)+c.charCodeAt(0))|0;
- const cacheKey='grass-wgsl-tune-v2:'+JSON.stringify(adapterInfo)+':'+codeHash;
+ const cacheKey='grass-wgsl-tune-v3:'+JSON.stringify(adapterInfo)+':'+codeHash;
  let running=false;
  return {backend:'webgpu',adapterInfo,get tuning(){return tuning;},async search(blocks:Block[],o:SearchOptions){
  if(running)throw Error('A search is already running.');running=true;
@@ -142,36 +175,61 @@ async function gpuSolver(){
   device.queue.writeBuffer(results[i],0,zero4);
  }
  device.queue.writeBuffer(blockBuffer,0,packed.data);
- const nySpan=Math.min(128,ayMax-ayMin+1);
- let target=nySpan>64?65536:131072;
+ const nySpan=Math.min(256,ayMax-ayMin+1);
+ let target=nySpan>128?262144:524288;
  const singleNorth=opts.north.length===1?opts.north[0]:-1;
  const allFour=packed.activeMask===15;
+ const anchorSide=packed.sideA!==0;
+ const manyBlocks=blocks.length>=3;
+ const minNonNegY=Math.max(0,-packed.b1y,-packed.b2y);
+ const maxNonNegY=65535-Math.max(0,packed.b1y,packed.b2y);
+ const chunkNonNegY=(ya:number,yb:number)=>ya>=minNonNegY&&yb<=maxNonNegY;
  if(!tuned){
  let cached:any=null;try{cached=JSON.parse(localStorage.getItem(cacheKey)||'null');}catch{}
  if(cached&&[64,128,256].includes(cached.wg)&&[1,2,4].includes(cached.items)){
  wg=cached.wg;items=cached.items;tuning={...cached,cached:true};
  }else{
- const trials:any[]=[];const count=262144,benchY=Math.min(ayMax,ayMin+31);
- par[0]=axMin;par[1]=azMin;par[2]=ayMin;par[3]=benchY;par[4]=1024;par[5]=0;par[6]=count;par[7]=blocks.length;
+ const trials:any[]=[];const count=524288;
+ // Always benchmark a full 128-level FD-aligned Y span so autotune measures the real hot loop.
+ const benchNonNeg=minNonNegY<=64&&191<=maxNonNegY;
+ const benchYa=benchNonNeg?64:-64;
+ const benchYb=benchYa+127;
+ par[0]=axMin;par[1]=azMin;par[2]=benchYa;par[3]=benchYb;par[4]=1024;par[5]=0;par[6]=count;par[7]=blocks.length;
  device.queue.writeBuffer(params[0],0,par);
- tuneLoop: for(const w of [64,128,256])for(const it of [1,2,4]){
+ // Warm up GPU clock before timing trials so the first (wg, items) isn't penalized by idle boost latency.
+ {
+  const warm=await getSearchPipeline(128,2,singleNorth,allFour,benchNonNeg,anchorSide,manyBlocks);
+  device.queue.writeBuffer(results[0],0,zero4);
+  const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(warm);pass.setBindGroup(0,groups[0]);pass.dispatchWorkgroups(Math.ceil(count/256));pass.end();
+  device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();
+ }
+ tuneLoop: for(const w of [128,256,64])for(const it of [2,1,4]){
   await opts.waitIfPaused?.();if(opts.signal?.aborted)break tuneLoop;
-  const candidate=await getSearchPipeline(w,it,singleNorth,allFour);
-  const times:number[]=[];
+  const candidate=await getSearchPipeline(w,it,singleNorth,allFour,benchNonNeg,anchorSide,manyBlocks);
+  let sum=0;
   for(let rep=0;rep<3;rep++){
-  device.queue.writeBuffer(results[0],0,zero4);const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(candidate);pass.setBindGroup(0,groups[0]);pass.dispatchWorkgroups(Math.ceil(count/(w*it)));pass.end();const before=performance.now();device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();if(rep)times.push(performance.now()-before);
+  device.queue.writeBuffer(results[0],0,zero4);const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(candidate);pass.setBindGroup(0,groups[0]);pass.dispatchWorkgroups(Math.ceil(count/(w*it)));pass.end();const before=performance.now();device.queue.submit([enc.finish()]);await device.queue.onSubmittedWorkDone();if(rep)sum+=performance.now()-before;
   }
-  trials.push({wg:w,items:it,ms:Math.min(...times)});
+  trials.push({wg:w,items:it,ms:sum/2});
  }
  trials.sort((a,b)=>a.ms-b.ms);const best=trials[0]||{wg:128,items:1,ms:0};wg=best.wg;items=best.items;tuning={...best,trials,cached:false};
  if(!opts.signal?.aborted&&trials.length===9){try{localStorage.setItem(cacheKey,JSON.stringify(best));}catch{}}
  }
  if(!opts.signal?.aborted)tuned=true;
  }
- const pipeline=await getSearchPipeline(wg,items,singleNorth,allFour);
+ const maxTarget=Math.min(2097152,65535*wg*items);
+ target=Math.min(target,maxTarget);
+ let currentPipeline:GPUComputePipeline|null=null;
+ let currentPipelineNonNeg:boolean|null=null;
+ async function ensurePipeline(nonNegY:boolean):Promise<GPUComputePipeline>{
+  if(currentPipeline&&currentPipelineNonNeg===nonNegY)return currentPipeline;
+  currentPipeline=await getSearchPipeline(wg,items,singleNorth,allFour,nonNegY,anchorSide,manyBlocks);
+  currentPipelineNonNeg=nonNegY;
+  return currentPipeline;
+ }
 
  let currentSlot=0;
- function submitChunk(slot:number,x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number):InFlightTask{
+ function submitChunk(slot:number,pipeline:GPUComputePipeline,x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number):InFlightTask{
   par[0]=x;par[1]=z;par[2]=ya;par[3]=yb;par[4]=width;par[5]=offset;par[6]=count;par[7]=blocks.length;
   device.queue.writeBuffer(params[slot],0,par);device.queue.writeBuffer(results[slot],0,zero4);
   const enc=device.createCommandEncoder();const pass=enc.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,groups[slot]);pass.dispatchWorkgroups(Math.ceil(count/(wg*items)));pass.end();
@@ -184,7 +242,7 @@ async function gpuSolver(){
   await task.mapPromise;
   const elapsed=performance.now()-task.tSubmit;
   const ratio=Math.max(0.5,Math.min(2,40/Math.max(1,elapsed)));
-  target=Math.min(524288,Math.max(256,Math.round((target*ratio)/256)*256));
+  target=Math.min(maxTarget,Math.max(256,Math.round((target*ratio)/256)*256));
   const read=reads[task.slot];
   const mapped=new Int32Array(read.getMappedRange());
   const found=mapped[0]>>>0;
@@ -212,7 +270,8 @@ async function gpuSolver(){
 
  async function dispatchChunk(x:number,z:number,width:number,offset:number,count:number,ya:number,yb:number){
   if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)return;
-  const nextTask=submitChunk(currentSlot,x,z,width,offset,count,ya,yb);
+  const pipeline=await ensurePipeline(chunkNonNegY(ya,yb));
+  const nextTask=submitChunk(currentSlot,pipeline,x,z,width,offset,count,ya,yb);
   currentSlot=(currentSlot+1)%RING_SIZE;
   inFlight.push(nextTask);
   if(inFlight.length>=RING_SIZE){
@@ -229,14 +288,33 @@ async function gpuSolver(){
   currentSlot=0;
  }
 
- // Process up to 128 Y levels per column dispatch so rotation_xz column hashes are amortized while keeping thread parallelism high.
- const Y_STEP=128;
- for(let ya=ayMin;ya<=ayMax;ya+=Y_STEP){
-  const yb=Math.min(ayMax,ya+Y_STEP-1);
-  for(let za=azMin;za<=azMax;za+=256){
-  const zh=Math.min(256,azMax-za+1);
-  for(let xa=axMin;xa<=axMax;xa+=4096){
-  const width=Math.min(4096,axMax-xa+1),size=width*zh;
+ // Split Y into non-negative u16 fast path [minNonNegY..maxNonNegY] (run first so surface matches arrive first
+ // and the signed pipeline can compile concurrently on CPU while GPU crunches positive Y) and signed path.
+ // Y_STEP=512 keeps the entire Minecraft Overworld 0..319 positive Y range in a single pass per column.
+ const Y_STEP=512;
+ const yRanges:Array<[number,number]>=[];
+ const posStart=Math.max(ayMin,minNonNegY);
+ const posEnd=Math.min(ayMax,maxNonNegY);
+ if(posStart<=posEnd){
+  for(let ya=posStart;ya<=posEnd;ya+=Y_STEP)yRanges.push([ya,Math.min(posEnd,ya+Y_STEP-1)]);
+ }
+ if(ayMin<minNonNegY){
+  const negEnd=Math.min(ayMax,minNonNegY-1);
+  for(let ya=ayMin;ya<=negEnd;ya+=Y_STEP)yRanges.push([ya,Math.min(negEnd,ya+Y_STEP-1)]);
+ }
+ if(ayMax>maxNonNegY){
+  const hiStart=Math.max(ayMin,maxNonNegY+1);
+  for(let ya=hiStart;ya<=ayMax;ya+=Y_STEP)yRanges.push([ya,Math.min(ayMax,ya+Y_STEP-1)]);
+ }
+ // Overlap compiling the signed pipeline while positive Y chunks execute on the GPU.
+ if(posStart<=posEnd&&(ayMin<minNonNegY||ayMax>maxNonNegY)){
+  void getSearchPipeline(wg,items,singleNorth,allFour,false,anchorSide,manyBlocks).catch(()=>{});
+ }
+ for(const [ya,yb] of yRanges){
+  for(let za=azMin;za<=azMax;za+=4096){
+  const zh=Math.min(4096,azMax-za+1);
+  for(let xa=axMin;xa<=axMax;xa+=65536){
+  const width=Math.min(65536,axMax-xa+1),size=width*zh;
   for(let off=0;off<size;){
   await opts.waitIfPaused?.();if(lost)throw Error(lost);if(opts.signal?.aborted||stopped)break;
   const count=Math.min(target,size-off);
