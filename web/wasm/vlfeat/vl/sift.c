@@ -664,6 +664,9 @@ Gaussian window size is set to have standard deviation
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
+#endif
 
 /** @internal @brief Use bilinear interpolation to compute orientations */
 #define VL_SIFT_BILINEAR_ORIENTATIONS 1
@@ -770,6 +773,69 @@ copy_and_upsample_rows
  **/
 
 static void
+upsample_2x_direct
+(vl_sift_pix       *dst,
+ vl_sift_pix const *src, int width, int height)
+{
+  int x, y ;
+  int dw = width * 2 ;
+#ifdef __wasm_simd128__
+  v128_t vhalf = wasm_f32x4_splat (0.5f) ;
+#endif
+
+  /* Fill even output rows directly from input rows */
+  for (y = 0 ; y < height ; ++y) {
+    vl_sift_pix const *srow = src + y * width ;
+    vl_sift_pix *drow = dst + (2 * y) * dw ;
+    x = 0 ;
+#ifdef __wasm_simd128__
+    for (; x + 4 < width ; x += 4) {
+      v128_t a = wasm_v128_load (srow + x) ;
+      v128_t b = wasm_v128_load (srow + x + 1) ;
+      v128_t m = wasm_f32x4_mul (wasm_f32x4_add (a, b), vhalf) ;
+      v128_t lo = wasm_i32x4_shuffle (a, m, 0, 4, 1, 5) ;
+      v128_t hi = wasm_i32x4_shuffle (a, m, 2, 6, 3, 7) ;
+      wasm_v128_store (drow + 2 * x, lo) ;
+      wasm_v128_store (drow + 2 * x + 4, hi) ;
+    }
+#endif
+    for (; x < width - 1 ; ++x) {
+      vl_sift_pix a = srow[x] ;
+      vl_sift_pix b = srow[x + 1] ;
+      drow[2 * x]     = a ;
+      drow[2 * x + 1] = 0.5f * (a + b) ;
+    }
+    drow[2 * width - 2] = srow[width - 1] ;
+    drow[2 * width - 1] = srow[width - 1] ;
+  }
+
+  /* Fill odd output rows as average of adjacent even rows */
+  for (y = 0 ; y < height - 1 ; ++y) {
+    vl_sift_pix const *r0 = dst + (2 * y) * dw ;
+    vl_sift_pix const *r1 = dst + (2 * y + 2) * dw ;
+    vl_sift_pix *rm = dst + (2 * y + 1) * dw ;
+    x = 0 ;
+#ifdef __wasm_simd128__
+    for (; x + 8 <= dw ; x += 8) {
+      v128_t a0 = wasm_v128_load (r0 + x) ;
+      v128_t b0 = wasm_v128_load (r1 + x) ;
+      v128_t a1 = wasm_v128_load (r0 + x + 4) ;
+      v128_t b1 = wasm_v128_load (r1 + x + 4) ;
+      wasm_v128_store (rm + x,     wasm_f32x4_mul (wasm_f32x4_add (a0, b0), vhalf)) ;
+      wasm_v128_store (rm + x + 4, wasm_f32x4_mul (wasm_f32x4_add (a1, b1), vhalf)) ;
+    }
+    for (; x + 4 <= dw ; x += 4) {
+      wasm_v128_store (rm + x, wasm_f32x4_mul (wasm_f32x4_add (wasm_v128_load (r0 + x), wasm_v128_load (r1 + x)), vhalf)) ;
+    }
+#endif
+    for (; x < dw ; ++x) {
+      rm[x] = 0.5f * (r0[x] + r1[x]) ;
+    }
+  }
+  memcpy (dst + (2 * height - 1) * dw, dst + (2 * height - 2) * dw, sizeof(vl_sift_pix) * dw) ;
+}
+
+static void
 _vl_sift_smooth (VlSiftFilt * self,
                  vl_sift_pix * outputImage,
                  vl_sift_pix * tempImage,
@@ -801,6 +867,162 @@ _vl_sift_smooth (VlSiftFilt * self,
     memcpy (outputImage, inputImage, sizeof(vl_sift_pix) * width * height) ;
     return ;
   }
+
+#ifdef __wasm_simd128__
+  {
+    int const W = (int)self->gaussFilterWidth ;
+    int const w = (int)width ;
+    int const h = (int)height ;
+    vl_sift_pix const *f = self->gaussFilter + W ; /* symmetric: f[k] == f[-k] */
+    static vl_sift_pix staticRowBuf[4352] ;
+    vl_size need = (vl_size)(w + 2 * W + 8) ;
+    vl_sift_pix *rowBuf = (need <= 4352) ? staticRowBuf : (vl_sift_pix*)vl_malloc (sizeof(vl_sift_pix) * need) ;
+    vl_sift_pix *rp = rowBuf + W ;
+    v128_t vc0 = wasm_f32x4_splat (f[0]) ;
+    int y, x, k ;
+
+    /* Pass 1: horizontal symmetric Gaussian blur (inputImage -> tempImage) */
+    for (y = 0 ; y < h ; ++y) {
+      vl_sift_pix const *srcRow = inputImage + (vl_size)y * width ;
+      vl_sift_pix *dstRow = tempImage + (vl_size)y * width ;
+      vl_sift_pix leftVal = srcRow[0] ;
+      vl_sift_pix rightVal = srcRow[w - 1] ;
+      for (k = 0 ; k < W ; ++k) rowBuf[k] = leftVal ;
+      memcpy (rp, srcRow, sizeof(vl_sift_pix) * width) ;
+      for (k = 0 ; k < W + 4 ; ++k) rp[w + k] = rightVal ;
+
+      x = 0 ;
+      for (; x + 8 <= w ; x += 8) {
+        v128_t a0 = wasm_f32x4_mul (wasm_v128_load (rp + x), vc0) ;
+        v128_t a1 = wasm_f32x4_mul (wasm_v128_load (rp + x + 4), vc0) ;
+        for (k = 1 ; k <= W ; ++k) {
+          v128_t ck = wasm_f32x4_splat (f[k]) ;
+          v128_t s0 = wasm_f32x4_add (wasm_v128_load (rp + x - k), wasm_v128_load (rp + x + k)) ;
+          v128_t s1 = wasm_f32x4_add (wasm_v128_load (rp + x + 4 - k), wasm_v128_load (rp + x + 4 + k)) ;
+          a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (s0, ck)) ;
+          a1 = wasm_f32x4_add (a1, wasm_f32x4_mul (s1, ck)) ;
+        }
+        wasm_v128_store (dstRow + x, a0) ;
+        wasm_v128_store (dstRow + x + 4, a1) ;
+      }
+      for (; x + 4 <= w ; x += 4) {
+        v128_t a0 = wasm_f32x4_mul (wasm_v128_load (rp + x), vc0) ;
+        for (k = 1 ; k <= W ; ++k) {
+          v128_t ck = wasm_f32x4_splat (f[k]) ;
+          v128_t s0 = wasm_f32x4_add (wasm_v128_load (rp + x - k), wasm_v128_load (rp + x + k)) ;
+          a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (s0, ck)) ;
+        }
+        wasm_v128_store (dstRow + x, a0) ;
+      }
+      for (; x < w ; ++x) {
+        vl_sift_pix acc = rp[x] * f[0] ;
+        for (k = 1 ; k <= W ; ++k) acc += (rp[x - k] + rp[x + k]) * f[k] ;
+        dstRow[x] = acc ;
+      }
+    }
+
+    if (rowBuf != staticRowBuf) vl_free (rowBuf) ;
+
+    /* Pass 2: vertical symmetric Gaussian blur (tempImage -> outputImage),
+     * strip-mined along x in 128-float tiles for L1 cache locality. */
+    {
+      int const TILE_X = 128 ;
+      int x0 ;
+      vl_sift_pix const *rm_stack[65] ;
+      vl_sift_pix const *rp_stack[65] ;
+      vl_sift_pix const **rm = (W <= 64) ? rm_stack : (vl_sift_pix const**)vl_malloc (sizeof(vl_sift_pix const*) * (W + 1)) ;
+      vl_sift_pix const **rpp = (W <= 64) ? rp_stack : (vl_sift_pix const**)vl_malloc (sizeof(vl_sift_pix const*) * (W + 1)) ;
+
+      for (x0 = 0 ; x0 < w ; x0 += TILE_X) {
+        int x1 = (x0 + TILE_X < w) ? (x0 + TILE_X) : w ;
+        for (y = 0 ; y < h ; ++y) {
+          vl_sift_pix const *r0 = tempImage + (vl_size)y * width ;
+          vl_sift_pix *outRow = outputImage + (vl_size)y * width ;
+
+          if (y >= W && y < h - W) {
+            x = x0 ;
+            for (; x + 8 <= x1 ; x += 8) {
+              v128_t a0 = wasm_f32x4_mul (wasm_v128_load (r0 + x), vc0) ;
+              v128_t a1 = wasm_f32x4_mul (wasm_v128_load (r0 + x + 4), vc0) ;
+              vl_sift_pix const *up = r0 + x - width ;
+              vl_sift_pix const *dn = r0 + x + width ;
+              for (k = 1 ; k <= W ; ++k) {
+                v128_t ck = wasm_f32x4_splat (f[k]) ;
+                v128_t s0 = wasm_f32x4_add (wasm_v128_load (up), wasm_v128_load (dn)) ;
+                v128_t s1 = wasm_f32x4_add (wasm_v128_load (up + 4), wasm_v128_load (dn + 4)) ;
+                a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (s0, ck)) ;
+                a1 = wasm_f32x4_add (a1, wasm_f32x4_mul (s1, ck)) ;
+                up -= width ;
+                dn += width ;
+              }
+              wasm_v128_store (outRow + x, a0) ;
+              wasm_v128_store (outRow + x + 4, a1) ;
+            }
+            for (; x + 4 <= x1 ; x += 4) {
+              v128_t a0 = wasm_f32x4_mul (wasm_v128_load (r0 + x), vc0) ;
+              vl_sift_pix const *up = r0 + x - width ;
+              vl_sift_pix const *dn = r0 + x + width ;
+              for (k = 1 ; k <= W ; ++k) {
+                v128_t ck = wasm_f32x4_splat (f[k]) ;
+                a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (wasm_f32x4_add (wasm_v128_load (up), wasm_v128_load (dn)), ck)) ;
+                up -= width ;
+                dn += width ;
+              }
+              wasm_v128_store (outRow + x, a0) ;
+            }
+            for (; x < x1 ; ++x) {
+              vl_sift_pix acc = r0[x] * f[0] ;
+              vl_sift_pix const *up = r0 + x - width ;
+              vl_sift_pix const *dn = r0 + x + width ;
+              for (k = 1 ; k <= W ; ++k) {
+                acc += (*up + *dn) * f[k] ;
+                up -= width ;
+                dn += width ;
+              }
+              outRow[x] = acc ;
+            }
+          } else {
+            for (k = 1 ; k <= W ; ++k) {
+              int ym = y - k ; if (ym < 0) ym = 0 ;
+              int yp = y + k ; if (yp >= h) yp = h - 1 ;
+              rm[k] = tempImage + (vl_size)ym * width ;
+              rpp[k] = tempImage + (vl_size)yp * width ;
+            }
+            x = x0 ;
+            for (; x + 8 <= x1 ; x += 8) {
+              v128_t a0 = wasm_f32x4_mul (wasm_v128_load (r0 + x), vc0) ;
+              v128_t a1 = wasm_f32x4_mul (wasm_v128_load (r0 + x + 4), vc0) ;
+              for (k = 1 ; k <= W ; ++k) {
+                v128_t ck = wasm_f32x4_splat (f[k]) ;
+                v128_t s0 = wasm_f32x4_add (wasm_v128_load (rm[k] + x), wasm_v128_load (rpp[k] + x)) ;
+                v128_t s1 = wasm_f32x4_add (wasm_v128_load (rm[k] + x + 4), wasm_v128_load (rpp[k] + x + 4)) ;
+                a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (s0, ck)) ;
+                a1 = wasm_f32x4_add (a1, wasm_f32x4_mul (s1, ck)) ;
+              }
+              wasm_v128_store (outRow + x, a0) ;
+              wasm_v128_store (outRow + x + 4, a1) ;
+            }
+            for (; x + 4 <= x1 ; x += 4) {
+              v128_t a0 = wasm_f32x4_mul (wasm_v128_load (r0 + x), vc0) ;
+              for (k = 1 ; k <= W ; ++k) {
+                v128_t ck = wasm_f32x4_splat (f[k]) ;
+                a0 = wasm_f32x4_add (a0, wasm_f32x4_mul (wasm_f32x4_add (wasm_v128_load (rm[k] + x), wasm_v128_load (rpp[k] + x)), ck)) ;
+              }
+              wasm_v128_store (outRow + x, a0) ;
+            }
+            for (; x < x1 ; ++x) {
+              vl_sift_pix acc = r0[x] * f[0] ;
+              for (k = 1 ; k <= W ; ++k) acc += (rm[k][x] + rpp[k][x]) * f[k] ;
+              outRow[x] = acc ;
+            }
+          }
+        }
+      }
+      if (rm != rm_stack) { vl_free ((void*)rm) ; vl_free ((void*)rpp) ; }
+    }
+    return ;
+  }
+#endif
 
   vl_imconvcol_vf (tempImage, height,
                    inputImage, width, height, width,
@@ -1016,8 +1238,7 @@ vl_sift_process_first_octave (VlSiftFilt *f, vl_sift_pix const *im)
 
   if (o_min < 0) {
     /* double once */
-    copy_and_upsample_rows (temp,   im,   width,      height) ;
-    copy_and_upsample_rows (octave, temp, height, 2 * width ) ;
+    upsample_2x_direct (octave, im, width, height) ;
 
     /* double more */
     for(o = -1 ; o > o_min ; --o) {
@@ -1178,10 +1399,21 @@ vl_sift_detect (VlSiftFilt * f)
   for (s = s_min ; s <= s_max - 1 ; ++s) {
     vl_sift_pix* src_a = vl_sift_get_octave (f, s    ) ;
     vl_sift_pix* src_b = vl_sift_get_octave (f, s + 1) ;
-    vl_sift_pix* end_a = src_a + w * h ;
-    while (src_a != end_a) {
-      *pt++ = *src_b++ - *src_a++ ;
+    int count = w * h ;
+    int idx = 0 ;
+#ifdef __wasm_simd128__
+    for (; idx + 8 <= count ; idx += 8) {
+      wasm_v128_store (pt + idx,     wasm_f32x4_sub (wasm_v128_load (src_b + idx),     wasm_v128_load (src_a + idx))) ;
+      wasm_v128_store (pt + idx + 4, wasm_f32x4_sub (wasm_v128_load (src_b + idx + 4), wasm_v128_load (src_a + idx + 4))) ;
     }
+    for (; idx + 4 <= count ; idx += 4) {
+      wasm_v128_store (pt + idx, wasm_f32x4_sub (wasm_v128_load (src_b + idx), wasm_v128_load (src_a + idx))) ;
+    }
+#endif
+    for (; idx < count ; ++idx) {
+      pt[idx] = src_b[idx] - src_a[idx] ;
+    }
+    pt += count ;
   }
 
   /* -----------------------------------------------------------------
@@ -1190,46 +1422,88 @@ vl_sift_detect (VlSiftFilt * f)
 
   /* start from dog [1,1,s_min+1] */
   pt  = dog + xo + yo + so ;
+  {
+#ifdef __wasm_simd128__
+    float const thresh_lo = (float)(0.8 * tp) - 1e-6f ;
+    v128_t const v_pos = wasm_f32x4_splat (thresh_lo) ;
+    v128_t const v_neg = wasm_f32x4_splat (-thresh_lo) ;
+#endif
 
   for(s = s_min + 1 ; s <= s_max - 2 ; ++s) {
     for(y = 1 ; y < h - 1 ; ++y) {
-      for(x = 1 ; x < w - 1 ; ++x) {
-        v = *pt ;
-
-#define CHECK_NEIGHBORS(CMP,SGN)                    \
+      x = 1 ;
+#define CHECK_NEIGHBORS_AT(P,CMP,SGN)               \
         ( v CMP ## = SGN 0.8 * tp &&                \
-          v CMP *(pt + xo) &&                       \
-          v CMP *(pt - xo) &&                       \
-          v CMP *(pt + so) &&                       \
-          v CMP *(pt - so) &&                       \
-          v CMP *(pt + yo) &&                       \
-          v CMP *(pt - yo) &&                       \
+          v CMP *((P) + xo) &&                      \
+          v CMP *((P) - xo) &&                      \
+          v CMP *((P) + so) &&                      \
+          v CMP *((P) - so) &&                      \
+          v CMP *((P) + yo) &&                      \
+          v CMP *((P) - yo) &&                      \
                                                     \
-          v CMP *(pt + yo + xo) &&                  \
-          v CMP *(pt + yo - xo) &&                  \
-          v CMP *(pt - yo + xo) &&                  \
-          v CMP *(pt - yo - xo) &&                  \
+          v CMP *((P) + yo + xo) &&                 \
+          v CMP *((P) + yo - xo) &&                 \
+          v CMP *((P) - yo + xo) &&                 \
+          v CMP *((P) - yo - xo) &&                 \
                                                     \
-          v CMP *(pt + xo      + so) &&             \
-          v CMP *(pt - xo      + so) &&             \
-          v CMP *(pt + yo      + so) &&             \
-          v CMP *(pt - yo      + so) &&             \
-          v CMP *(pt + yo + xo + so) &&             \
-          v CMP *(pt + yo - xo + so) &&             \
-          v CMP *(pt - yo + xo + so) &&             \
-          v CMP *(pt - yo - xo + so) &&             \
+          v CMP *((P) + xo      + so) &&            \
+          v CMP *((P) - xo      + so) &&            \
+          v CMP *((P) + yo      + so) &&            \
+          v CMP *((P) - yo      + so) &&            \
+          v CMP *((P) + yo + xo + so) &&            \
+          v CMP *((P) + yo - xo + so) &&            \
+          v CMP *((P) - yo + xo + so) &&            \
+          v CMP *((P) - yo - xo + so) &&            \
                                                     \
-          v CMP *(pt + xo      - so) &&             \
-          v CMP *(pt - xo      - so) &&             \
-          v CMP *(pt + yo      - so) &&             \
-          v CMP *(pt - yo      - so) &&             \
-          v CMP *(pt + yo + xo - so) &&             \
-          v CMP *(pt + yo - xo - so) &&             \
-          v CMP *(pt - yo + xo - so) &&             \
-          v CMP *(pt - yo - xo - so) )
+          v CMP *((P) + xo      - so) &&            \
+          v CMP *((P) - xo      - so) &&            \
+          v CMP *((P) + yo      - so) &&            \
+          v CMP *((P) - yo      - so) &&            \
+          v CMP *((P) + yo + xo - so) &&            \
+          v CMP *((P) + yo - xo - so) &&            \
+          v CMP *((P) - yo + xo - so) &&            \
+          v CMP *((P) - yo - xo - so) )
 
-        if (CHECK_NEIGHBORS(>,+) ||
-            CHECK_NEIGHBORS(<,-) ) {
+#ifdef __wasm_simd128__
+      for(; x + 4 <= w - 1 ; x += 4) {
+        v128_t vv = wasm_v128_load (pt) ;
+        v128_t vl = wasm_v128_load (pt - 1) ;
+        v128_t vr = wasm_v128_load (pt + 1) ;
+        v128_t is_max = wasm_v128_and (wasm_f32x4_ge (vv, v_pos),
+                          wasm_v128_and (wasm_f32x4_gt (vv, vl), wasm_f32x4_gt (vv, vr))) ;
+        v128_t is_min = wasm_v128_and (wasm_f32x4_le (vv, v_neg),
+                          wasm_v128_and (wasm_f32x4_lt (vv, vl), wasm_f32x4_lt (vv, vr))) ;
+        int mask = wasm_i32x4_bitmask (wasm_v128_or (is_max, is_min)) ;
+        if (__builtin_expect (mask != 0, 0)) {
+          int lane ;
+          for (lane = 0 ; lane < 4 ; ++lane) {
+            if (mask & (1 << lane)) {
+              vl_sift_pix *p = pt + lane ;
+              v = *p ;
+              if (CHECK_NEIGHBORS_AT(p,>,+) || CHECK_NEIGHBORS_AT(p,<,-)) {
+                if (f->nkeys >= f->keys_res) {
+                  f->keys_res += 500 ;
+                  if (f->keys) {
+                    f->keys = vl_realloc (f->keys, f->keys_res * sizeof(VlSiftKeypoint)) ;
+                  } else {
+                    f->keys = vl_malloc (f->keys_res * sizeof(VlSiftKeypoint)) ;
+                  }
+                }
+                k = f->keys + (f->nkeys ++) ;
+                k-> ix = x + lane ;
+                k-> iy = y ;
+                k-> is = s ;
+              }
+            }
+          }
+        }
+        pt += 4 ;
+      }
+#endif
+      for(; x < w - 1 ; ++x) {
+        v = *pt ;
+        if (CHECK_NEIGHBORS_AT(pt,>,+) ||
+            CHECK_NEIGHBORS_AT(pt,<,-) ) {
 
           /* make room for more keypoints */
           if (f->nkeys >= f->keys_res) {
@@ -1255,6 +1529,7 @@ vl_sift_detect (VlSiftFilt * f)
       pt += 2 ;
     }
     pt += 2 * yo ;
+  }
   }
 
   /* -----------------------------------------------------------------
@@ -1497,6 +1772,37 @@ update_gradient (VlSiftFilt *f)
 
       /* middle pixels of the middle rows */
       end = (src - 1) + w - 1 ;
+#ifdef __wasm_simd128__
+      {
+        v128_t const vhalf = wasm_f32x4_splat (0.5f) ;
+        v128_t const vzero = wasm_f32x4_splat (0.0f) ;
+        v128_t const veps  = wasm_f32x4_splat (VL_EPSILON_F) ;
+        v128_t const vc3   = wasm_f32x4_splat (0.1821f) ;
+        v128_t const vc1   = wasm_f32x4_splat (0.9675f) ;
+        v128_t const vpi4  = wasm_f32x4_splat ((float)(VL_PI / 4.0)) ;
+        v128_t const v3pi4 = wasm_f32x4_splat ((float)(3.0 * VL_PI / 4.0)) ;
+        v128_t const v2pi  = wasm_f32x4_splat ((float)(2.0 * VL_PI)) ;
+        while (src + 4 <= end) {
+          v128_t vgx = wasm_f32x4_mul (vhalf, wasm_f32x4_sub (wasm_v128_load (src + xo), wasm_v128_load (src - xo))) ;
+          v128_t vgy = wasm_f32x4_mul (vhalf, wasm_f32x4_sub (wasm_v128_load (src + yo), wasm_v128_load (src - yo))) ;
+          v128_t mag = wasm_f32x4_sqrt (wasm_f32x4_add (wasm_f32x4_mul (vgx, vgx), wasm_f32x4_mul (vgy, vgy))) ;
+          v128_t abs_y = wasm_f32x4_add (wasm_f32x4_abs (vgy), veps) ;
+          v128_t ge0 = wasm_f32x4_ge (vgx, vzero) ;
+          v128_t num = wasm_v128_bitselect (wasm_f32x4_sub (vgx, abs_y), wasm_f32x4_add (vgx, abs_y), ge0) ;
+          v128_t den = wasm_v128_bitselect (wasm_f32x4_add (vgx, abs_y), wasm_f32x4_sub (abs_y, vgx), ge0) ;
+          v128_t r   = wasm_f32x4_div (num, den) ;
+          v128_t ang = wasm_f32x4_add (wasm_v128_bitselect (vpi4, v3pi4, ge0),
+                         wasm_f32x4_mul (wasm_f32x4_sub (wasm_f32x4_mul (vc3, wasm_f32x4_mul (r, r)), vc1), r)) ;
+          ang = wasm_v128_bitselect (wasm_f32x4_neg (ang), ang, wasm_f32x4_lt (vgy, vzero)) ;
+          ang = wasm_v128_bitselect (wasm_f32x4_add (ang, v2pi), ang, wasm_f32x4_lt (ang, vzero)) ;
+          ang = wasm_v128_bitselect (wasm_f32x4_sub (ang, v2pi), ang, wasm_f32x4_ge (ang, v2pi)) ;
+          wasm_v128_store (grad,     wasm_i32x4_shuffle (mag, ang, 0, 4, 1, 5)) ;
+          wasm_v128_store (grad + 4, wasm_i32x4_shuffle (mag, ang, 2, 6, 3, 7)) ;
+          grad += 8 ;
+          src  += 4 ;
+        }
+      }
+#endif
       while (src < end) {
         gx = 0.5 * (src[+xo] - src[-xo]) ;
         gy = 0.5 * (src[+yo] - src[-yo]) ;
@@ -1613,43 +1919,52 @@ vl_sift_calc_keypoint_orientations (VlSiftFilt *f,
 #undef  at
 #define at(dx,dy) (*(pt + xo * (dx) + yo * (dy)))
 
-  for(ys  =  VL_MAX (- W,       - yi) ;
-      ys <=  VL_MIN (+ W, h - 1 - yi) ; ++ys) {
+  {
+    double const inv_2sigmaw2 = 1.0 / (2.0 * sigmaw * sigmaw) ;
+    double const nbins_over_2pi = nbins / (2.0 * VL_PI) ;
+    double const max_r2 = (double)W * W + 0.6 ;
+    int const ys_min = VL_MAX (- W,       - yi) ;
+    int const ys_max = VL_MIN (+ W, h - 1 - yi) ;
+    int const xs_min = VL_MAX (- W,       - xi) ;
+    int const xs_max = VL_MIN (+ W, w - 1 - xi) ;
 
-    for(xs  = VL_MAX (- W,       - xi) ;
-        xs <= VL_MIN (+ W, w - 1 - xi) ; ++xs) {
+    for (ys = ys_min ; ys <= ys_max ; ++ys) {
+      double dy = (double)(yi + ys) - y ;
+      double dy2 = dy * dy ;
+      vl_sift_pix const *row = pt + ys * yo + xs_min * xo ;
+      double dx = (double)(xi + xs_min) - x ;
 
+      for (xs = xs_min ; xs <= xs_max ; ++xs, dx += 1.0, row += xo) {
+        double r2 = dx * dx + dy2 ;
+        double wgt, mod, ang, fbin ;
 
-      double dx = (double)(xi + xs) - x;
-      double dy = (double)(yi + ys) - y;
-      double r2 = dx*dx + dy*dy ;
-      double wgt, mod, ang, fbin ;
+        /* limit to a circular window */
+        if (r2 >= max_r2) continue ;
 
-      /* limit to a circular window */
-      if (r2 >= W*W + 0.6) continue ;
-
-      wgt  = fast_expn (r2 / (2*sigmaw*sigmaw)) ;
-      mod  = *(pt + xs*xo + ys*yo    ) ;
-      ang  = *(pt + xs*xo + ys*yo + 1) ;
-      fbin = nbins * ang / (2 * VL_PI) ;
+        wgt  = fast_expn (r2 * inv_2sigmaw2) ;
+        mod  = row[0] ;
+        ang  = row[1] ;
+        fbin = ang * nbins_over_2pi ;
 
 #if defined(VL_SIFT_BILINEAR_ORIENTATIONS)
-      {
-        int bin = (int) vl_floor_d (fbin - 0.5) ;
-        double rbin = fbin - bin - 0.5 ;
-        hist [(bin + nbins) % nbins] += (1 - rbin) * mod * wgt ;
-        hist [(bin + 1    ) % nbins] += (    rbin) * mod * wgt ;
-      }
+        {
+          int bin = (int) vl_floor_d (fbin - 0.5) ;
+          double rbin = fbin - bin - 0.5 ;
+          double mw = mod * wgt ;
+          int b0 = bin ; if (b0 < 0) b0 += nbins ; else if (b0 >= nbins) b0 -= nbins ;
+          int b1 = b0 + 1 ; if (b1 >= nbins) b1 -= nbins ;
+          hist [b0] += (1.0 - rbin) * mw ;
+          hist [b1] += (      rbin) * mw ;
+        }
 #else
-      {
-        int    bin  = vl_floor_d (fbin) ;
-        bin = vl_floor_d (nbins * ang / (2*VL_PI)) ;
-        hist [(bin) % nbins] += mod * wgt ;
-      }
+        {
+          int bin = (int) vl_floor_d (fbin) ;
+          hist [(bin + nbins) % nbins] += mod * wgt ;
+        }
 #endif
-
-    } /* for xs */
-  } /* for ys */
+      } /* for xs */
+    } /* for ys */
+  }
 
   /* smooth histogram */
   for (iter = 0; iter < 6; iter ++) {
@@ -1704,8 +2019,37 @@ normalize_histogram
 (vl_sift_pix *begin, vl_sift_pix *end)
 {
   vl_sift_pix* iter ;
-  vl_sift_pix  norm = 0.0 ;
+  vl_sift_pix  norm = 0.0f ;
+#ifdef __wasm_simd128__
+  int n = (int)(end - begin) ;
+  int i = 0 ;
+  v128_t acc0 = wasm_f32x4_splat (0.0f) ;
+  v128_t acc1 = wasm_f32x4_splat (0.0f) ;
+  for (; i + 8 <= n ; i += 8) {
+    v128_t v0 = wasm_v128_load (begin + i) ;
+    v128_t v1 = wasm_v128_load (begin + i + 4) ;
+    acc0 = wasm_f32x4_add (acc0, wasm_f32x4_mul (v0, v0)) ;
+    acc1 = wasm_f32x4_add (acc1, wasm_f32x4_mul (v1, v1)) ;
+  }
+  v128_t s = wasm_f32x4_add (acc0, acc1) ;
+  s = wasm_f32x4_add (s, wasm_i32x4_shuffle (s, s, 2, 3, 0, 1)) ;
+  s = wasm_f32x4_add (s, wasm_i32x4_shuffle (s, s, 1, 0, 3, 2)) ;
+  norm = wasm_f32x4_extract_lane (s, 0) ;
+  for (; i < n ; ++i) norm += begin[i] * begin[i] ;
 
+  norm = vl_sqrt_f (norm) + VL_EPSILON_F ;
+  {
+    float inv = 1.0f / norm ;
+    v128_t vinv = wasm_f32x4_splat (inv) ;
+    i = 0 ;
+    for (; i + 8 <= n ; i += 8) {
+      wasm_v128_store (begin + i,     wasm_f32x4_mul (wasm_v128_load (begin + i),     vinv)) ;
+      wasm_v128_store (begin + i + 4, wasm_f32x4_mul (wasm_v128_load (begin + i + 4), vinv)) ;
+    }
+    for (; i < n ; ++i) begin[i] *= inv ;
+  }
+  return norm ;
+#else
   for (iter = begin ; iter != end ; ++ iter)
     norm += (*iter) * (*iter) ;
 
@@ -1715,6 +2059,7 @@ normalize_histogram
     *iter /= norm ;
 
   return norm;
+#endif
 }
 
 /** ------------------------------------------------------------------
@@ -1990,79 +2335,270 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
   /* clear descriptor */
   memset (descr, 0, sizeof(vl_sift_pix) * NBO*NBP*NBP) ;
 
-  /* Center the scale space and the descriptor on the current keypoint.
-   * Note that dpt is pointing to the bin of center (SBP/2,SBP/2,0).
-   */
+  /* Center the scale space and the descriptor on the current keypoint. */
   pt  = f->grad + xi*xo + yi*yo + (si - f->s_min - 1)*so ;
-  dpt = descr + (NBP/2) * binyo + (NBP/2) * binxo ;
-
-#undef atd
-#define atd(dbinx,dbiny,dbint) *(dpt + (dbint)*binto + (dbiny)*binyo + (dbinx)*binxo)
 
   /*
    * Process pixels in the intersection of the image rectangle
    * (1,1)-(M-1,N-1) and the keypoint bounding box.
+   * Use a padded 6x6x8 histogram so binx,biny in [-3, 1] splat branchlessly.
    */
-  for(dyi =  VL_MAX (- W, 1 - yi    ) ;
-      dyi <= VL_MIN (+ W, h - yi - 2) ; ++ dyi) {
+  {
+    float hbuf[6 * 6 * 9] ; /* stride-9 orientation avoids (t0+1)&7 modulo in scatter loop */
+    int const dy_min = VL_MAX (- W, 1 - yi    ) ;
+    int const dy_max = VL_MIN (+ W, h - yi - 2) ;
+    int const dx_min = VL_MAX (- W, 1 - xi    ) ;
+    int const dx_max = VL_MIN (+ W, w - xi - 2) ;
+    float const inv_SBP      = (float)(1.0 / SBP) ;
+    float const ct0_sbp      = (float)(ct0 * inv_SBP) ;
+    float const st0_sbp      = (float)(st0 * inv_SBP) ;
+    float const wsigma       = (float)f->windowSize ;
+    float const inv_2wsigma2 = (float)(1.0 / (2.0 * wsigma * wsigma)) ;
+    float const two_pi       = (float)(2.0 * VL_PI) ;
+    float const nbo_over_2pi = (float)(NBO / (2.0 * VL_PI)) ;
+    float const ang0f        = (float)angle0 ;
+    float const base_dx      = (float)(xi - x) ;
+    float const base_dy      = (float)(yi - y) ;
+    int by, bx ;
 
-    for(dxi =  VL_MAX (- W, 1 - xi    ) ;
-        dxi <= VL_MIN (+ W, w - xi - 2) ; ++ dxi) {
+    memset (hbuf, 0, sizeof(hbuf)) ;
 
-      /* retrieve */
-      vl_sift_pix mod   = *( pt + dxi*xo + dyi*yo + 0 ) ;
-      vl_sift_pix angle = *( pt + dxi*xo + dyi*yo + 1 ) ;
-      vl_sift_pix theta = vl_mod_2pi_f (angle - angle0) ;
+    for (dyi = dy_min ; dyi <= dy_max ; ++dyi) {
+      float dy = base_dy + (float)dyi ;
+      float ax = ct0_sbp * base_dx + st0_sbp * dy ;
+      float ay = -st0_sbp * base_dx + ct0_sbp * dy ;
+      float lo = (float)dx_min ;
+      float hi = (float)dx_max ;
+      int x_lo, x_hi ;
+      float nx, ny ;
+      vl_sift_pix const *row ;
 
-      /* fractional displacement */
-      vl_sift_pix dx = xi + dxi - x;
-      vl_sift_pix dy = yi + dyi - y;
+      /* Intersect active dxi interval with -2.5 <= nx < 2.5 and -2.5 <= ny < 2.5 */
+      if (ct0_sbp > 1e-7f) {
+        float l = (-2.5f - ax) / ct0_sbp ;
+        float r = ( 2.5f - ax) / ct0_sbp ;
+        if (l > lo) lo = l ;
+        if (r < hi) hi = r ;
+      } else if (ct0_sbp < -1e-7f) {
+        float l = ( 2.5f - ax) / ct0_sbp ;
+        float r = (-2.5f - ax) / ct0_sbp ;
+        if (l > lo) lo = l ;
+        if (r < hi) hi = r ;
+      } else if (ax < -2.5f || ax >= 2.5f) {
+        continue ;
+      }
 
-      /* get the displacement normalized w.r.t. the keypoint
-         orientation and extension */
-      vl_sift_pix nx = ( ct0 * dx + st0 * dy) / SBP ;
-      vl_sift_pix ny = (-st0 * dx + ct0 * dy) / SBP ;
-      vl_sift_pix nt = NBO * theta / (2 * VL_PI) ;
+      {
+        float sy = -st0_sbp ;
+        if (sy > 1e-7f) {
+          float l = (-2.5f - ay) / sy ;
+          float r = ( 2.5f - ay) / sy ;
+          if (l > lo) lo = l ;
+          if (r < hi) hi = r ;
+        } else if (sy < -1e-7f) {
+          float l = ( 2.5f - ay) / sy ;
+          float r = (-2.5f - ay) / sy ;
+          if (l > lo) lo = l ;
+          if (r < hi) hi = r ;
+        } else if (ay < -2.5f || ay >= 2.5f) {
+          continue ;
+        }
+      }
 
-      /* Get the Gaussian weight of the sample. The Gaussian window
-       * has a standard deviation equal to NBP/2. Note that dx and dy
-       * are in the normalized frame, so that -NBP/2 <= dx <=
-       * NBP/2. */
-      vl_sift_pix const wsigma = f->windowSize ;
-      vl_sift_pix win = fast_expn
-        ((nx*nx + ny*ny)/(2.0 * wsigma * wsigma)) ;
+      if (lo > hi) continue ;
+      x_lo = (int)vl_floor_f (lo) ;
+      x_hi = (int)vl_ceil_f (hi) ;
+      if (x_lo < dx_min) x_lo = dx_min ;
+      if (x_hi > dx_max) x_hi = dx_max ;
 
-      /* The sample will be distributed in 8 adjacent bins.
-         We start from the ``lower-left'' bin. */
-      int         binx = (int)vl_floor_f (nx - 0.5) ;
-      int         biny = (int)vl_floor_f (ny - 0.5) ;
-      int         bint = (int)vl_floor_f (nt) ;
-      vl_sift_pix rbinx = nx - (binx + 0.5) ;
-      vl_sift_pix rbiny = ny - (biny + 0.5) ;
-      vl_sift_pix rbint = nt - bint ;
-      int         dbinx ;
-      int         dbiny ;
-      int         dbint ;
+      while (x_lo <= x_hi) {
+        float tnx = ax + ct0_sbp * (float)x_lo ;
+        float tny = ay - st0_sbp * (float)x_lo ;
+        if (tnx >= -2.5f && tnx < 2.5f && tny >= -2.5f && tny < 2.5f) break ;
+        ++x_lo ;
+      }
+      while (x_hi >= x_lo) {
+        float tnx = ax + ct0_sbp * (float)x_hi ;
+        float tny = ay - st0_sbp * (float)x_hi ;
+        if (tnx >= -2.5f && tnx < 2.5f && tny >= -2.5f && tny < 2.5f) break ;
+        --x_hi ;
+      }
+      if (x_lo > x_hi) continue ;
 
-      /* Distribute the current sample into the 8 adjacent bins*/
-      for(dbinx = 0 ; dbinx < 2 ; ++dbinx) {
-        for(dbiny = 0 ; dbiny < 2 ; ++dbiny) {
-          for(dbint = 0 ; dbint < 2 ; ++dbint) {
+      nx = ax + ct0_sbp * (float)x_lo ;
+      ny = ay - st0_sbp * (float)x_lo ;
+      row = pt + dyi * yo + x_lo * xo ;
+      dxi = x_lo ;
 
-            if (binx + dbinx >= - (NBP/2) &&
-                binx + dbinx <    (NBP/2) &&
-                biny + dbiny >= - (NBP/2) &&
-                biny + dbiny <    (NBP/2) ) {
-              vl_sift_pix weight = win
-                * mod
-                * vl_abs_f (1 - dbinx - rbinx)
-                * vl_abs_f (1 - dbiny - rbiny)
-                * vl_abs_f (1 - dbint - rbint) ;
+#ifdef __wasm_simd128__
+      {
+        v128_t const vstep_x = wasm_f32x4_splat (4.0f * ct0_sbp) ;
+        v128_t const vstep_y = wasm_f32x4_splat (-4.0f * st0_sbp) ;
+        v128_t const voff0123 = wasm_f32x4_make (0.0f, 1.0f, 2.0f, 3.0f) ;
+        v128_t vnx = wasm_f32x4_add (wasm_f32x4_splat (nx), wasm_f32x4_mul (wasm_f32x4_splat (ct0_sbp), voff0123)) ;
+        v128_t vny = wasm_f32x4_sub (wasm_f32x4_splat (ny), wasm_f32x4_mul (wasm_f32x4_splat (st0_sbp), voff0123)) ;
+        v128_t const vang0 = wasm_f32x4_splat (ang0f) ;
+        v128_t const v2pi = wasm_f32x4_splat (two_pi) ;
+        v128_t const vzero = wasm_f32x4_splat (0.0f) ;
+        v128_t const vone = wasm_f32x4_splat (1.0f) ;
+        v128_t const vhalf = wasm_f32x4_splat (0.5f) ;
+        v128_t const v_nbo2pi = wasm_f32x4_splat (nbo_over_2pi) ;
+        v128_t const v_inv2ws2_half = wasm_f32x4_splat (-0.5f * inv_2wsigma2) ;
+        v128_t const vc2 = wasm_f32x4_splat (0.5f) ;
+        v128_t const vc3 = wasm_f32x4_splat (0.16666667f) ;
+        v128_t const vc4 = wasm_f32x4_splat (0.04166667f) ;
+        v128_t const vc5 = wasm_f32x4_splat (0.00833333f) ;
+        v128_t const vthree_i = wasm_i32x4_splat (3) ;
+        v128_t const v54_i = wasm_i32x4_splat (54) ;
+        v128_t const v9_i = wasm_i32x4_splat (9) ;
+        v128_t const v7_i = wasm_i32x4_splat (7) ;
 
-              atd(binx+dbinx, biny+dbiny, (bint+dbint) % NBO) += weight ;
+        for (; dxi + 4 <= x_hi + 1 ; dxi += 4, row += 8) {
+          v128_t g0 = wasm_v128_load (row) ;
+          v128_t g1 = wasm_v128_load (row + 4) ;
+          v128_t vmod = wasm_i32x4_shuffle (g0, g1, 0, 2, 4, 6) ;
+          v128_t vang = wasm_i32x4_shuffle (g0, g1, 1, 3, 5, 7) ;
+
+          v128_t vtheta = wasm_f32x4_sub (vang, vang0) ;
+          vtheta = wasm_v128_bitselect (wasm_f32x4_add (vtheta, v2pi), vtheta, wasm_f32x4_lt (vtheta, vzero)) ;
+          vtheta = wasm_v128_bitselect (wasm_f32x4_sub (vtheta, v2pi), vtheta, wasm_f32x4_ge (vtheta, v2pi)) ;
+          vtheta = wasm_v128_bitselect (wasm_f32x4_add (vtheta, v2pi), vtheta, wasm_f32x4_lt (vtheta, vzero)) ;
+          v128_t vnt = wasm_f32x4_mul (vtheta, v_nbo2pi) ;
+
+          /* exp(-(nx^2+ny^2)/(2*wsigma^2)) via squared degree-5 Taylor on u = -0.5*x in [-0.8, 0] */
+          v128_t vu = wasm_f32x4_mul (wasm_f32x4_add (wasm_f32x4_mul (vnx, vnx), wasm_f32x4_mul (vny, vny)), v_inv2ws2_half) ;
+          v128_t ve = wasm_f32x4_add (vc4, wasm_f32x4_mul (vu, vc5)) ;
+          ve = wasm_f32x4_add (vc3, wasm_f32x4_mul (vu, ve)) ;
+          ve = wasm_f32x4_add (vc2, wasm_f32x4_mul (vu, ve)) ;
+          ve = wasm_f32x4_add (vone, wasm_f32x4_mul (vu, ve)) ;
+          ve = wasm_f32x4_add (vone, wasm_f32x4_mul (vu, ve)) ;
+          v128_t vwm = wasm_f32x4_mul (wasm_f32x4_mul (ve, ve), vmod) ;
+
+          v128_t vnxm = wasm_f32x4_sub (vnx, vhalf) ;
+          v128_t vnym = wasm_f32x4_sub (vny, vhalf) ;
+          v128_t vflx = wasm_f32x4_floor (vnxm) ;
+          v128_t vfly = wasm_f32x4_floor (vnym) ;
+          v128_t vflt = wasm_f32x4_floor (vnt) ;
+
+          v128_t vrx = wasm_f32x4_sub (vnxm, vflx) ;
+          v128_t vry = wasm_f32x4_sub (vnym, vfly) ;
+          v128_t vrt = wasm_f32x4_sub (vnt, vflt) ;
+          v128_t vwt0 = wasm_f32x4_sub (vone, vrt) ;
+
+          v128_t vwy0 = wasm_f32x4_mul (vwm, wasm_f32x4_sub (vone, vry)) ;
+          v128_t vwy1 = wasm_f32x4_mul (vwm, vry) ;
+          v128_t vwx0 = wasm_f32x4_sub (vone, vrx) ;
+
+          v128_t vw00 = wasm_f32x4_mul (vwy0, vwx0) ;
+          v128_t vw10 = wasm_f32x4_mul (vwy0, vrx) ;
+          v128_t vw01 = wasm_f32x4_mul (vwy1, vwx0) ;
+          v128_t vw11 = wasm_f32x4_mul (vwy1, vrx) ;
+
+          v128_t vw00_0 = wasm_f32x4_mul (vw00, vwt0) ;
+          v128_t vw00_1 = wasm_f32x4_mul (vw00, vrt) ;
+          v128_t vw10_0 = wasm_f32x4_mul (vw10, vwt0) ;
+          v128_t vw10_1 = wasm_f32x4_mul (vw10, vrt) ;
+          v128_t vw01_0 = wasm_f32x4_mul (vw01, vwt0) ;
+          v128_t vw01_1 = wasm_f32x4_mul (vw01, vrt) ;
+          v128_t vw11_0 = wasm_f32x4_mul (vw11, vwt0) ;
+          v128_t vw11_1 = wasm_f32x4_mul (vw11, vrt) ;
+
+          v128_t vbx = wasm_i32x4_add (wasm_i32x4_trunc_sat_f32x4 (vflx), vthree_i) ;
+          v128_t vby = wasm_i32x4_add (wasm_i32x4_trunc_sat_f32x4 (vfly), vthree_i) ;
+          v128_t vbt0 = wasm_v128_and (wasm_i32x4_trunc_sat_f32x4 (vflt), v7_i) ;
+          v128_t voff = wasm_i32x4_add (wasm_i32x4_add (wasm_i32x4_mul (vby, v54_i), wasm_i32x4_mul (vbx, v9_i)), vbt0) ;
+
+          int offs[4] ;
+          float c00a[4], c00b[4], c10a[4], c10b[4], c01a[4], c01b[4], c11a[4], c11b[4] ;
+          wasm_v128_store (offs, voff) ;
+          wasm_v128_store (c00a, vw00_0) ; wasm_v128_store (c00b, vw00_1) ;
+          wasm_v128_store (c10a, vw10_0) ; wasm_v128_store (c10b, vw10_1) ;
+          wasm_v128_store (c01a, vw01_0) ; wasm_v128_store (c01b, vw01_1) ;
+          wasm_v128_store (c11a, vw11_0) ; wasm_v128_store (c11b, vw11_1) ;
+
+          /* Scatter in order 0,2,1,3 to reduce store-to-load forwarding stalls on shared bins */
+          {
+            static int const ord[4] = {0, 2, 1, 3} ;
+            int k ;
+            for (k = 0 ; k < 4 ; ++k) {
+              int m = ord[k] ;
+              float *p0 = hbuf + offs[m] ;
+              float *p1 = p0 + 54 ;
+              p0[0]  += c00a[m] ; p0[1]  += c00b[m] ;
+              p0[9]  += c10a[m] ; p0[10] += c10b[m] ;
+              p1[0]  += c01a[m] ; p1[1]  += c01b[m] ;
+              p1[9]  += c11a[m] ; p1[10] += c11b[m] ;
             }
           }
+
+          vnx = wasm_f32x4_add (vnx, vstep_x) ;
+          vny = wasm_f32x4_add (vny, vstep_y) ;
         }
+        nx = ax + ct0_sbp * (float)dxi ;
+        ny = ay - st0_sbp * (float)dxi ;
+      }
+#endif
+
+      for (; dxi <= x_hi ; ++dxi, nx += ct0_sbp, ny -= st0_sbp, row += xo) {
+        int binx, biny, bint, t0 ;
+        float rbinx, rbiny, rbint, wx0, wx1, wy0, wy1, wt0, wt1, win, mod, angle, theta, nt, wm ;
+        float *p0, *p1 ;
+
+        mod   = row[0] ;
+        angle = row[1] ;
+        theta = angle - ang0f ;
+        if (theta < 0.0f) {
+          theta += two_pi ;
+          if (theta < 0.0f) theta = vl_mod_2pi_f (theta) ;
+        } else if (theta >= two_pi) {
+          theta -= two_pi ;
+          if (theta >= two_pi) theta = vl_mod_2pi_f (theta) ;
+        }
+
+        nt  = theta * nbo_over_2pi ;
+        win = (float)fast_expn ((double)((nx * nx + ny * ny) * inv_2wsigma2)) ;
+        wm  = win * mod ;
+
+        binx = (int)vl_floor_f (nx - 0.5f) ;
+        biny = (int)vl_floor_f (ny - 0.5f) ;
+        bint = (int)vl_floor_f (nt) ;
+        rbinx = nx - (binx + 0.5f) ;
+        rbiny = ny - (biny + 0.5f) ;
+        rbint = nt - bint ;
+
+        wx1 = rbinx ; wx0 = 1.0f - rbinx ;
+        wy1 = rbiny ; wy0 = 1.0f - rbiny ;
+        wt1 = rbint ; wt0 = 1.0f - rbint ;
+
+        t0 = bint & (NBO - 1) ;
+        p0 = hbuf + (biny + 3) * 54 + (binx + 3) * 9 + t0 ;
+        p1 = p0 + 54 ;
+        {
+          float wmy0 = wm * wy0 ;
+          float wmy1 = wm * wy1 ;
+          float w00 = wmy0 * wx0, w10 = wmy0 * wx1 ;
+          float w01 = wmy1 * wx0, w11 = wmy1 * wx1 ;
+          p0[0]  += w00 * wt0 ; p0[1]  += w00 * wt1 ;
+          p0[9]  += w10 * wt0 ; p0[10] += w10 * wt1 ;
+          p1[0]  += w01 * wt0 ; p1[1]  += w01 * wt1 ;
+          p1[9]  += w11 * wt0 ; p1[10] += w11 * wt1 ;
+        }
+      }
+    }
+
+    /* Fold stride-9 bin[8] back into bin[0] and copy interior 4x4x8 region into descr */
+    for (by = 0 ; by < NBP ; ++by) {
+      for (bx = 0 ; bx < NBP ; ++bx) {
+        float *src = hbuf + (by + 1) * 54 + (bx + 1) * 9 ;
+        float *dst = descr + (by * NBP + bx) * NBO ;
+        dst[0] = src[0] + src[8] ;
+        dst[1] = src[1] ;
+        dst[2] = src[2] ;
+        dst[3] = src[3] ;
+        dst[4] = src[4] ;
+        dst[5] = src[5] ;
+        dst[6] = src[6] ;
+        dst[7] = src[7] ;
       }
     }
   }
@@ -2081,9 +2617,18 @@ vl_sift_calc_keypoint_descriptor (VlSiftFilt *f,
     else {
 
       /* Truncate at 0.2. */
+#ifdef __wasm_simd128__
+      {
+        v128_t vmax = wasm_f32x4_splat (0.2f) ;
+        for (bin = 0 ; bin < NBO*NBP*NBP ; bin += 4) {
+          wasm_v128_store (descr + bin, wasm_f32x4_pmin (wasm_v128_load (descr + bin), vmax)) ;
+        }
+      }
+#else
       for(bin = 0; bin < NBO*NBP*NBP ; ++ bin) {
         if (descr [bin] > 0.2) descr [bin] = 0.2;
       }
+#endif
 
       /* Normalize again. */
       normalize_histogram (descr, descr + NBO*NBP*NBP) ;
