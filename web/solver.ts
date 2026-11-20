@@ -1,3 +1,4 @@
+import {assetUrl} from './src/asset-dir';
 import workerSource from './solver-worker.ts?worker';
 import {turnBlocks as rawTurnBlocks,validate,type Block,type SearchOptions} from './hash';
 const turnBlocks=(blocks:Block[],n:number)=>rawTurnBlocks(blocks,n).sort((a,b)=>a.is_side-b.is_side);
@@ -70,7 +71,7 @@ async function gpuSolver(){
  if(!adapter)throw Error('No WebGPU adapter. Try the WASM CPU mode or a native solver.');
  const device=await adapter.requestDevice();let lost;
  device.lost.then(i=>{lost=i.message||'GPU device lost';});
- const code=await (await fetch(new URL('./kernel.wgsl',import.meta.url))).text();
+ const code=await (await fetch(assetUrl('kernel.wgsl',import.meta.url))).text();
  const module=device.createShaderModule({code});
  const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==='error');
  if(errors.length)throw Error(errors.map(e=>e.message).join('\n'));
@@ -295,7 +296,7 @@ function cpuSolver(requested?:number){
   return task;
  }
 
- const wasmUrl=new URL('./solver.wasm',import.meta.url).href;
+ const wasmUrl=assetUrl('solver.wasm',import.meta.url);
  const runMsg=(worker:Worker,msg:any)=>new Promise<any>((res,rej)=>{
   worker.onmessage=e=>e.data.error?rej(Error(e.data.error)):res(e.data);worker.onerror=e=>rej(Error(e.message));worker.postMessage(msg);
  });

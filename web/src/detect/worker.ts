@@ -52,21 +52,10 @@ async function initGpu(pipelineUrl: string) {
     try {
       let shaderCode: string | null = null;
       try {
-        const res = await fetch(new URL('../detect.wgsl', import.meta.url));
+        // Same versioned directory as the pipeline loader and WASM.
+        const res = await fetch(new URL('detect.wgsl', pipelineUrl));
         if (res.ok) shaderCode = await res.text();
       } catch {}
-      if (!shaderCode) {
-        try {
-          const res = await fetch(new URL('detect.wgsl', pipelineUrl));
-          if (res.ok) shaderCode = await res.text();
-        } catch {}
-      }
-      if (!shaderCode) {
-        try {
-          const res = await fetch(new URL('../detect.wgsl', pipelineUrl));
-          if (res.ok) shaderCode = await res.text();
-        } catch {}
-      }
       if (shaderCode) {
         const detector = await WebGpuDetector.create(shaderCode);
         if (detector) {

@@ -3,6 +3,7 @@ import { runStart, normalizeRange, rangeBounds, DEFAULT_RANGE } from './start-fl
 import workerSource from 'inline-worker:./detect/worker';
 import { parseFormation, formatFormation, applyNorth, FBlock } from './formation';
 import { createSolver } from '../solver';
+import { ASSET_DIR } from './asset-dir';
 
 const $ = (s: string) => document.querySelector(s) as any;
 const view = $('#view') as HTMLCanvasElement, ctx = view.getContext('2d')!;
@@ -52,7 +53,7 @@ function startWorker() {
     else if (m.type === 'result') { onResult(m.result); const p = pendingDetect; pendingDetect = null; p?.resolve({ blocks: m.result?.blocks?.length ? blocks : [], reason: m.result?.reason }); }
     else if (m.type === 'quadResult') onQuadResult(m);
   };
-  worker.postMessage({ type: 'init', pipelineUrl: base + 'vendor/grass-pipeline.js' });
+  worker.postMessage({ type: 'init', pipelineUrl: new URL(ASSET_DIR + 'grass-pipeline.js', base).href });
   setStatus('loading detector', 'busy');
 }
 function busyDet(b: boolean) { if (!b) $('#detBar').hidden = true; upd(); }
